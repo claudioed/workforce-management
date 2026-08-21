@@ -1,0 +1,121 @@
+package assignment
+
+import (
+	"testing"
+	"time"
+
+	"github.com/claudioed/workforce-management/internal/domain/shared"
+)
+
+func TestAssign_FirstAssignmentRaisesLaborAssigned(t *testing.T) {
+	now := time.Now()
+	la := NewLaborAssignment("assoc-1")
+
+	if err := la.Assign("pack", true, now); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	events := la.PullEvents()
+	if len(events) != 1 || events[0].EventName() != "LaborAssigned" {
+		t.Fatalf("expected LaborAssigned event, got %+v", events)
+	}
+	pathId, active := la.ActivePathId()
+	if !active || pathId != "pack" {
+		t.Fatalf("expected active assignment to pack, got %v active=%v", pathId, active)
+	}
+}
+
+// TestAssign_RejectsMissingCertification is a Definition-of-Done named
+// failing-path test: assignment without the required certification must be
+// rejected.
+func TestAssign_RejectsMissingCertification(t *testing.T) {
+	now := time.Now()
+	la := NewLaborAssignment("assoc-1")
+
+	err := la.Assign("hazmat", false, now)
+	if err != ErrCertificationRequired {
+		t.Fatalf("expected ErrCertificationRequired, got %v", err)
+	}
+	if la.IsActive() {
+		t.Fatal("expected no active assignment after rejected assign")
+	}
+}
+
+// TestAssign_SecondAssignmentEndsPriorAndRaisesReassigned is a
+// Definition-of-Done named failing-path test in spirit: it proves the
+// "exactly one ACTIVE assignment per associate" invariant holds by
+// construction — assigning again always ends the previous active interval
+// rather than creating a second active one.
+func TestAssign_SecondAssignmentEndsPriorAndRaisesReassigned(t *testing.T) {
+	start := time.Now()
+	la := NewLaborAssignment("assoc-1")
+	if err := la.Assign("pack", true, start); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	la.PullEvents()
+
+	later := start.Add(2 * time.Hour)
+	if err := la.Assign("stow", true, later); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	events := la.PullEvents()
+	if len(events) != 1 || events[0].EventName() != "LaborReassigned" {
+		t.Fatalf("expected LaborReassigned event, got %+v", events)
+	}
+
+	pathId, active := la.ActivePathId()
+	if !active || pathId != "stow" {
+		t.Fatalf("expected single active assignment to stow, got %v active=%v", pathId, active)
+	}
+
+	history := la.History()
+	if len(history) != 1 || history[0].PathId != "pack" || history[0].End == nil {
+		t.Fatalf("expected pack interval closed in history, got %+v", history)
+	}
+}
+
+func TestEndActive_ClosesActiveAssignment(t *testing.T) {
+	start := time.Now()
+	la := NewLaborAssignment("assoc-1")
+	_ = la.Assign("pack", true, start)
+	la.PullEvents()
+
+	end := start.Add(4 * time.Hour)
+	closed, ok := la.EndActive(end)
+	if !ok {
+		t.Fatal("expected an active interval to close")
+	}
+	if closed.PathId != "pack" || closed.Hours(end) != 4 {
+		t.Fatalf("expected 4 hour pack interval, got %+v", closed)
+	}
+	if la.IsActive() {
+		t.Fatal("expected no active assignment after EndActive")
+	}
+}
+
+func TestEndActive_NoOpWhenNoneActive(t *testing.T) {
+	la := NewLaborAssignment("assoc-1")
+	_, ok := la.EndActive(time.Now())
+	if ok {
+		t.Fatal("expected no active interval to close")
+	}
+}
+
+func TestRehydrate_PreservesState(t *testing.T) {
+	start := time.Now()
+	end := start.Add(time.Hour)
+	history := []Interval{{PathId: "stow", Start: start, End: &end}}
+	active := &Interval{PathId: "pack", Start: end}
+
+	la := Rehydrate("assoc-1", active, history)
+	if la.AssociateId() != shared.AssociateId("assoc-1") {
+		t.Fatalf("unexpected associate id: %v", la.AssociateId())
+	}
+	pathId, ok := la.ActivePathId()
+	if !ok || pathId != "pack" {
+		t.Fatalf("expected active pack assignment, got %v ok=%v", pathId, ok)
+	}
+	if len(la.History()) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(la.History()))
+	}
+}
