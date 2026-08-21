@@ -5,18 +5,22 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	inbound "github.com/claudioed/workforce-management/internal/adapters/inbound/http"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/clock"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
+	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/postgres"
+	"github.com/claudioed/workforce-management/internal/application/ports"
 	"github.com/claudioed/workforce-management/internal/application/usecases"
 )
 
@@ -46,8 +50,13 @@ func run() error {
 	associates := postgres.NewAssociateRepo(pool)
 	shiftPlans := postgres.NewShiftPlanRepo(pool)
 	assignments := postgres.NewAssignmentRepo(pool)
-	publisher := events.NewLogPublisher(log.Default())
 	sysClock := clock.System{}
+
+	publisher, closePublisher, err := newEventPublisher(shiftPlans)
+	if err != nil {
+		return err
+	}
+	defer closePublisher()
 
 	handler := &inbound.Handler{
 		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: publisher, Clock: sysClock},
@@ -87,6 +96,28 @@ func run() error {
 		return server.Shutdown(shutdownCtx)
 	}
 	return nil
+}
+
+// newEventPublisher selects an EventPublisher via EVENT_PUBLISHER
+// (kafka|log, default log) so existing behavior — and existing tests — are
+// unaffected unless kafka is explicitly opted into. It returns a close func
+// to release any adapter resources on shutdown.
+func newEventPublisher(shiftPlans ports.ShiftPlanRepo) (ports.EventPublisher, func(), error) {
+	switch envOrDefault("EVENT_PUBLISHER", "log") {
+	case "kafka":
+		brokers := strings.Split(envOrDefault("KAFKA_BROKERS", "localhost:9092"), ",")
+		pub := kafka.NewPublisher(brokers, shiftPlans)
+		log.Printf("event publisher: kafka brokers=%v topic=%s", brokers, kafka.Topic)
+		return pub, func() {
+			if err := pub.Close(); err != nil {
+				log.Printf("kafka publisher close: %v", err)
+			}
+		}, nil
+	case "log":
+		return events.NewLogPublisher(log.Default()), func() {}, nil
+	default:
+		return nil, nil, fmt.Errorf("unknown EVENT_PUBLISHER %q (want kafka or log)", os.Getenv("EVENT_PUBLISHER"))
+	}
 }
 
 func requireEnv(key string) string {

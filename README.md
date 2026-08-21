@@ -92,6 +92,8 @@ Env vars:
 | `HTTP_ADDR` | no | `:8080` | listen address |
 | `MIGRATIONS_PATH` | no | `migrations` | path to golang-migrate SQL files |
 | `MAX_HOURS_PER_SHIFT` | no | `8` | the configured max-hours-per-shift cap |
+| `EVENT_PUBLISHER` | no | `log` | `log` or `kafka` — see [Integration](#integration) |
+| `KAFKA_BROKERS` | no | `localhost:9092` | comma-separated broker list, used when `EVENT_PUBLISHER=kafka` |
 
 ## API
 
@@ -131,6 +133,64 @@ curl "localhost:8080/paths/pack/staffing-gap?buildingId=bldg-1&shiftId=shift-1"
 curl -X POST localhost:8080/associates/assoc-1/end-shift
 
 curl localhost:8080/healthz
+```
+
+## Integration
+
+This service can publish `ShiftPlanCommitted` to the shared warehouse-systems
+Kafka broker so other bounded contexts (e.g. `wes-work-planning`, which
+projects these into its own `LaborPlanObserved` read model, keyed by
+`path_id`) can react to committed headcount without calling back into this
+service. This round it only publishes — it does not consume anything.
+
+- **Topic**: `warehouse.workforce.events`
+- **Broker**: `KAFKA_BROKERS` (default `localhost:9092`) — points at the
+  shared broker started separately via
+  `~/warehouse-systems/docker-compose.kafka.yml`; this repo's own
+  `docker-compose.yml` only runs Postgres.
+- **Selection**: `EVENT_PUBLISHER=kafka` to publish to Kafka, `EVENT_PUBLISHER=log`
+  (default) to keep publishing to the in-memory/log publisher used by tests
+  and local runs that don't need cross-service integration.
+- **Fan-out**: a `ShiftPlan` has multiple `PathPlan` lines. `CommitShiftPlan`
+  with 3 path lines publishes **3** Kafka messages — one per path line, each
+  carrying that single path's `planned_heads`/`planned_rate`/`planned_hours`.
+  This matches how `wes-work-planning` keys its read model, by `path_id`.
+- **Envelope** (identical shape across all warehouse-systems services):
+
+```json
+{
+  "event_id": "uuid-v4",
+  "event_type": "ShiftPlanCommitted",
+  "occurred_at": "2026-08-21T22:00:00Z",
+  "source": "workforce-management",
+  "data": {
+    "building_id": "...",
+    "shift_id": "...",
+    "path_id": "...",
+    "planned_heads": 3,
+    "planned_rate": 30,
+    "planned_hours": 24
+  }
+}
+```
+
+Smoke test against the shared broker:
+
+```bash
+# shared broker already running: ~/warehouse-systems/docker-compose.kafka.yml
+export EVENT_PUBLISHER=kafka
+export KAFKA_BROKERS=localhost:9092
+go run ./cmd/workforce
+
+curl -X POST localhost:8080/shift-plans \
+  -d '{"buildingId":"bldg-1","shiftId":"shift-1","lines":[
+        {"pathId":"pack","plannedHeads":3,"plannedRate":30,"plannedHours":24,"installedStations":10},
+        {"pathId":"pick","plannedHeads":2,"plannedRate":25,"plannedHours":16,"installedStations":10}
+      ]}'
+
+# in another terminal, confirm 2 messages landed on the topic:
+docker exec warehouse-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic warehouse.workforce.events --from-beginning --max-messages 2
 ```
 
 ## Test

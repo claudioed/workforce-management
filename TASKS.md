@@ -52,3 +52,16 @@ Build the full bounded context described in CLAUDE.md, in order. Keep
   red-path test. Do the smoke test: run the compiled binary and curl /healthz
   plus at least one write endpoint before declaring done. Do not stop until the
   Definition of Done in CLAUDE.md is met.
+
+## Task 7 — Cross-service integration (additive, see INTEGRATION.md)
+- Read INTEGRATION.md in this repo first.
+- Add `github.com/segmentio/kafka-go` dependency.
+- New Kafka outbound publisher adapter implementing the existing EventPublisher
+  port, publishing one ShiftPlanCommitted message per PathPlan line to
+  warehouse.workforce.events, selected via EVENT_PUBLISHER env (default "log").
+- Unit test the envelope shape + the one-message-per-path-line fan-out.
+- README gains an Integration section. REAL smoke test against the shared
+  broker (docker-compose.kafka.yml in ~/warehouse-systems, localhost:9092):
+  call POST /shift-plans with 2+ path lines and confirm 2+ messages land on
+  the topic before declaring done.
+- Full existing suite (build/vet/test/-race) must still be green afterward.
