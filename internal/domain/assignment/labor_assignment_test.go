@@ -101,6 +101,50 @@ func TestEndActive_NoOpWhenNoneActive(t *testing.T) {
 	}
 }
 
+func TestInterval_HoursOnActiveInterval(t *testing.T) {
+	start := time.Now()
+	iv := Interval{PathId: "pack", Start: start}
+
+	hours := iv.Hours(start.Add(2 * time.Hour))
+	if hours != 2 {
+		t.Fatalf("expected 2 hours for still-active interval, got %v", hours)
+	}
+}
+
+func TestActivePathId_NoneActive(t *testing.T) {
+	la := NewLaborAssignment("assoc-1")
+
+	pathId, active := la.ActivePathId()
+	if active || pathId != "" {
+		t.Fatalf("expected no active assignment, got %v active=%v", pathId, active)
+	}
+}
+
+func TestActiveInterval_NoneActive(t *testing.T) {
+	la := NewLaborAssignment("assoc-1")
+
+	iv, ok := la.ActiveInterval()
+	if ok || iv != (Interval{}) {
+		t.Fatalf("expected no active interval, got %+v ok=%v", iv, ok)
+	}
+}
+
+func TestActiveInterval_ReturnsCopyOfActive(t *testing.T) {
+	start := time.Now()
+	la := NewLaborAssignment("assoc-1")
+	if err := la.Assign("pack", true, start); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	iv, ok := la.ActiveInterval()
+	if !ok {
+		t.Fatal("expected an active interval")
+	}
+	if iv.PathId != "pack" || !iv.Start.Equal(start) || iv.End != nil {
+		t.Fatalf("unexpected active interval: %+v", iv)
+	}
+}
+
 func TestRehydrate_PreservesState(t *testing.T) {
 	start := time.Now()
 	end := start.Add(time.Hour)

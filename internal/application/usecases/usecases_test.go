@@ -39,6 +39,103 @@ func newFixtures() *fixtures {
 	}
 }
 
+// errBoom is a sentinel error injected by the failing* fakes below to
+// exercise use-case error-handling branches the in-memory adapters can
+// never trigger on their own: they never return an error from Save, and
+// only ever return ports.ErrNotFound from a lookup.
+
+var errBoom = errors.New("boom")
+
+// failingAssociateRepo wraps a real *memory.AssociateRepo so tests can force
+// Save or FindByID to fail while otherwise delegating to the real repo.
+type failingAssociateRepo struct {
+	*memory.AssociateRepo
+	saveErr error
+	findErr error
+}
+
+func (r *failingAssociateRepo) Save(ctx context.Context, a *associate.AssociateShift) error {
+	if r.saveErr != nil {
+		return r.saveErr
+	}
+	return r.AssociateRepo.Save(ctx, a)
+}
+
+func (r *failingAssociateRepo) FindByID(ctx context.Context, id shared.AssociateId) (*associate.AssociateShift, error) {
+	if r.findErr != nil {
+		return nil, r.findErr
+	}
+	return r.AssociateRepo.FindByID(ctx, id)
+}
+
+// failingShiftPlanRepo wraps a real *memory.ShiftPlanRepo so tests can force
+// Save or FindByBuildingAndShift to fail while otherwise delegating to the
+// real repo.
+type failingShiftPlanRepo struct {
+	*memory.ShiftPlanRepo
+	saveErr error
+	findErr error
+}
+
+func (r *failingShiftPlanRepo) Save(ctx context.Context, sp *shiftplan.ShiftPlan) error {
+	if r.saveErr != nil {
+		return r.saveErr
+	}
+	return r.ShiftPlanRepo.Save(ctx, sp)
+}
+
+func (r *failingShiftPlanRepo) FindByBuildingAndShift(ctx context.Context, buildingId, shiftId string) (*shiftplan.ShiftPlan, error) {
+	if r.findErr != nil {
+		return nil, r.findErr
+	}
+	return r.ShiftPlanRepo.FindByBuildingAndShift(ctx, buildingId, shiftId)
+}
+
+// failingAssignmentRepo wraps a real *memory.AssignmentRepo so tests can
+// force Save, FindByAssociateID, or CountActiveByPath to fail while
+// otherwise delegating to the real repo.
+type failingAssignmentRepo struct {
+	*memory.AssignmentRepo
+	saveErr  error
+	findErr  error
+	countErr error
+}
+
+func (r *failingAssignmentRepo) Save(ctx context.Context, la *assignment.LaborAssignment) error {
+	if r.saveErr != nil {
+		return r.saveErr
+	}
+	return r.AssignmentRepo.Save(ctx, la)
+}
+
+func (r *failingAssignmentRepo) FindByAssociateID(ctx context.Context, id shared.AssociateId) (*assignment.LaborAssignment, error) {
+	if r.findErr != nil {
+		return nil, r.findErr
+	}
+	return r.AssignmentRepo.FindByAssociateID(ctx, id)
+}
+
+func (r *failingAssignmentRepo) CountActiveByPath(ctx context.Context, pathId shared.PathId) (int, error) {
+	if r.countErr != nil {
+		return 0, r.countErr
+	}
+	return r.AssignmentRepo.CountActiveByPath(ctx, pathId)
+}
+
+// failingPublisher wraps a real *events.LogPublisher so tests can force
+// Publish to fail while otherwise delegating to the real publisher.
+type failingPublisher struct {
+	*events.LogPublisher
+	err error
+}
+
+func (p *failingPublisher) Publish(ctx context.Context, evts ...shared.DomainEvent) error {
+	if p.err != nil {
+		return p.err
+	}
+	return p.LogPublisher.Publish(ctx, evts...)
+}
+
 func TestStartAssociateShift_PersistsAndPublishes(t *testing.T) {
 	f := newFixtures()
 	uc := &StartAssociateShift{Associates: f.associates, Events: f.pub, Clock: f.clock}
@@ -318,5 +415,412 @@ func TestEndAssociateShift_ClosesActiveAssignmentAndShift(t *testing.T) {
 	count, _ := f.assignments.CountActiveByPath(context.Background(), "pack")
 	if count != 0 {
 		t.Fatalf("expected 0 active assignments after shift end, got %d", count)
+	}
+}
+
+func TestStartAssociateShift_SaveError(t *testing.T) {
+	f := newFixtures()
+	repo := &failingAssociateRepo{AssociateRepo: f.associates, saveErr: errBoom}
+	uc := &StartAssociateShift{Associates: repo, Events: f.pub, Clock: f.clock}
+	_, err := uc.Execute(context.Background(), "assoc-1", nil)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestStartAssociateShift_PublishError(t *testing.T) {
+	f := newFixtures()
+	pub := &failingPublisher{LogPublisher: f.pub, err: errBoom}
+	uc := &StartAssociateShift{Associates: f.associates, Events: pub, Clock: f.clock}
+	_, err := uc.Execute(context.Background(), "assoc-1", nil)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestCertifyAssociate_SaveError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1")
+	repo := &failingAssociateRepo{AssociateRepo: f.associates, saveErr: errBoom}
+	uc := &CertifyAssociate{Associates: repo, Events: f.pub, Clock: f.clock}
+	err := uc.Execute(context.Background(), "assoc-1", "hazmat")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestCertifyAssociate_PublishError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1")
+	pub := &failingPublisher{LogPublisher: f.pub, err: errBoom}
+	uc := &CertifyAssociate{Associates: f.associates, Events: pub, Clock: f.clock}
+	err := uc.Execute(context.Background(), "assoc-1", "hazmat")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestProposePathPlan_PublishError(t *testing.T) {
+	f := newFixtures()
+	pub := &failingPublisher{LogPublisher: f.pub, err: errBoom}
+	uc := &ProposePathPlan{Events: pub, Clock: f.clock}
+	_, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestCommitShiftPlan_SaveError(t *testing.T) {
+	f := newFixtures()
+	repo := &failingShiftPlanRepo{ShiftPlanRepo: f.shiftPlans, saveErr: errBoom}
+	uc := &CommitShiftPlan{ShiftPlans: repo, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+
+	lines := []shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 5, PlannedRate: 30, PlannedHours: 40}}
+	installed := map[shared.PathId]int{"pack": 10}
+
+	_, err := uc.Execute(context.Background(), "bldg-1", "shift-1", lines, installed)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestCommitShiftPlan_PublishError(t *testing.T) {
+	f := newFixtures()
+	pub := &failingPublisher{LogPublisher: f.pub, err: errBoom}
+	uc := &CommitShiftPlan{ShiftPlans: f.shiftPlans, Events: pub, Clock: f.clock, MaxHoursPerShift: 8}
+
+	lines := []shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 5, PlannedRate: 30, PlannedHours: 40}}
+	installed := map[shared.PathId]int{"pack": 10}
+
+	_, err := uc.Execute(context.Background(), "bldg-1", "shift-1", lines, installed)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestAssignLabor_AssociateNotFound(t *testing.T) {
+	f := newFixtures()
+	uc := &AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	_, err := uc.Execute(context.Background(), "ghost", "pack")
+	if !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestAssignLabor_FindAssignmentError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1", "pack")
+	repo := &failingAssignmentRepo{AssignmentRepo: f.assignments, findErr: errBoom}
+	uc := &AssignLabor{Associates: f.associates, Assignments: repo, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	_, err := uc.Execute(context.Background(), "assoc-1", "pack")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+// TestAssignLabor_LogHoursExceedsMax exercises shift.LogHours failing from
+// inside AssignLabor.Execute (a reassignment closing a too-long interval) —
+// distinct from the domain-level LogHours tests in associate_shift_test.go.
+func TestAssignLabor_LogHoursExceedsMax(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1", "pack", "stow")
+
+	uc := &AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 2}
+	if _, err := uc.Execute(context.Background(), "assoc-1", "pack"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	f.clock.now = f.clock.now.Add(3 * time.Hour)
+	_, err := uc.Execute(context.Background(), "assoc-1", "stow")
+	if !errors.Is(err, associate.ErrMaxHoursExceeded) {
+		t.Fatalf("expected ErrMaxHoursExceeded, got %v", err)
+	}
+}
+
+func TestAssignLabor_AssociatesSaveError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1", "pack", "stow")
+
+	first := &AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	if _, err := first.Execute(context.Background(), "assoc-1", "pack"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	f.clock.now = f.clock.now.Add(1 * time.Hour)
+	repo := &failingAssociateRepo{AssociateRepo: f.associates, saveErr: errBoom}
+	uc := &AssignLabor{Associates: repo, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	_, err := uc.Execute(context.Background(), "assoc-1", "stow")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestAssignLabor_AssignmentsSaveError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1", "pack")
+	repo := &failingAssignmentRepo{AssignmentRepo: f.assignments, saveErr: errBoom}
+	uc := &AssignLabor{Associates: f.associates, Assignments: repo, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	_, err := uc.Execute(context.Background(), "assoc-1", "pack")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestAssignLabor_PublishError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1", "pack")
+	pub := &failingPublisher{LogPublisher: f.pub, err: errBoom}
+	uc := &AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: pub, Clock: f.clock, MaxHoursPerShift: 8}
+	_, err := uc.Execute(context.Background(), "assoc-1", "pack")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestStartBreak_NotFound(t *testing.T) {
+	f := newFixtures()
+	uc := &StartBreak{Associates: f.associates, Events: f.pub, Clock: f.clock}
+	err := uc.Execute(context.Background(), "ghost")
+	if !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestStartBreak_SaveError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1")
+	repo := &failingAssociateRepo{AssociateRepo: f.associates, saveErr: errBoom}
+	uc := &StartBreak{Associates: repo, Events: f.pub, Clock: f.clock}
+	err := uc.Execute(context.Background(), "assoc-1")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestStartBreak_PublishError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1")
+	pub := &failingPublisher{LogPublisher: f.pub, err: errBoom}
+	uc := &StartBreak{Associates: f.associates, Events: pub, Clock: f.clock}
+	err := uc.Execute(context.Background(), "assoc-1")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestEndBreak_NotFound(t *testing.T) {
+	f := newFixtures()
+	uc := &EndBreak{Associates: f.associates, Events: f.pub, Clock: f.clock}
+	err := uc.Execute(context.Background(), "ghost")
+	if !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestEndBreak_SaveError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1")
+	startBreak := &StartBreak{Associates: f.associates, Events: f.pub, Clock: f.clock}
+	if err := startBreak.Execute(context.Background(), "assoc-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	repo := &failingAssociateRepo{AssociateRepo: f.associates, saveErr: errBoom}
+	uc := &EndBreak{Associates: repo, Events: f.pub, Clock: f.clock}
+	err := uc.Execute(context.Background(), "assoc-1")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestEndBreak_PublishError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1")
+	startBreak := &StartBreak{Associates: f.associates, Events: f.pub, Clock: f.clock}
+	if err := startBreak.Execute(context.Background(), "assoc-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	pub := &failingPublisher{LogPublisher: f.pub, err: errBoom}
+	uc := &EndBreak{Associates: f.associates, Events: pub, Clock: f.clock}
+	err := uc.Execute(context.Background(), "assoc-1")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestGetStaffingGap_PlanNotFound(t *testing.T) {
+	f := newFixtures()
+	uc := &GetStaffingGap{ShiftPlans: f.shiftPlans, Assignments: f.assignments, Events: f.pub, Clock: f.clock}
+	_, err := uc.Execute(context.Background(), "bldg-1", "shift-1", "pack")
+	if !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestGetStaffingGap_CountActiveError(t *testing.T) {
+	f := newFixtures()
+	commit := &CommitShiftPlan{ShiftPlans: f.shiftPlans, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	lines := []shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 3, PlannedRate: 30, PlannedHours: 24}}
+	if _, err := commit.Execute(context.Background(), "bldg-1", "shift-1", lines, map[shared.PathId]int{"pack": 5}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	repo := &failingAssignmentRepo{AssignmentRepo: f.assignments, countErr: errBoom}
+	uc := &GetStaffingGap{ShiftPlans: f.shiftPlans, Assignments: repo, Events: f.pub, Clock: f.clock}
+	_, err := uc.Execute(context.Background(), "bldg-1", "shift-1", "pack")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestGetStaffingGap_PublishErrorWhenUnderstaffed(t *testing.T) {
+	f := newFixtures()
+	commit := &CommitShiftPlan{ShiftPlans: f.shiftPlans, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	lines := []shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 3, PlannedRate: 30, PlannedHours: 24}}
+	if _, err := commit.Execute(context.Background(), "bldg-1", "shift-1", lines, map[shared.PathId]int{"pack": 5}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	pub := &failingPublisher{LogPublisher: f.pub, err: errBoom}
+	uc := &GetStaffingGap{ShiftPlans: f.shiftPlans, Assignments: f.assignments, Events: pub, Clock: f.clock}
+	_, err := uc.Execute(context.Background(), "bldg-1", "shift-1", "pack")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestGetStaffingGap_NotUnderstaffed(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1", "pack")
+	assign := &AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	if _, err := assign.Execute(context.Background(), "assoc-1", "pack"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	commit := &CommitShiftPlan{ShiftPlans: f.shiftPlans, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	lines := []shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 1, PlannedRate: 30, PlannedHours: 8}}
+	if _, err := commit.Execute(context.Background(), "bldg-1", "shift-1", lines, map[shared.PathId]int{"pack": 5}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	uc := &GetStaffingGap{ShiftPlans: f.shiftPlans, Assignments: f.assignments, Events: f.pub, Clock: f.clock}
+	gap, err := uc.Execute(context.Background(), "bldg-1", "shift-1", "pack")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gap.Understaffed {
+		t.Fatalf("expected not understaffed, got %+v", gap)
+	}
+
+	for _, e := range f.pub.Events() {
+		if e.EventName() == "PathUnderstaffed" {
+			t.Fatal("did not expect PathUnderstaffed to be published")
+		}
+	}
+}
+
+func TestEndAssociateShift_AssociateNotFound(t *testing.T) {
+	f := newFixtures()
+	uc := &EndAssociateShift{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	err := uc.Execute(context.Background(), "ghost")
+	if !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestEndAssociateShift_FindAssignmentError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1", "pack")
+	repo := &failingAssignmentRepo{AssignmentRepo: f.assignments, findErr: errBoom}
+	uc := &EndAssociateShift{Associates: f.associates, Assignments: repo, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	err := uc.Execute(context.Background(), "assoc-1")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+// TestEndAssociateShift_LogHoursExceedsMax exercises shift.LogHours failing
+// from inside EndAssociateShift.Execute when closing the active assignment.
+func TestEndAssociateShift_LogHoursExceedsMax(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1", "pack")
+
+	assign := &AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	if _, err := assign.Execute(context.Background(), "assoc-1", "pack"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	f.clock.now = f.clock.now.Add(3 * time.Hour)
+	end := &EndAssociateShift{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 2}
+	err := end.Execute(context.Background(), "assoc-1")
+	if !errors.Is(err, associate.ErrMaxHoursExceeded) {
+		t.Fatalf("expected ErrMaxHoursExceeded, got %v", err)
+	}
+}
+
+func TestEndAssociateShift_AssignmentsSaveError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1", "pack")
+
+	assign := &AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	if _, err := assign.Execute(context.Background(), "assoc-1", "pack"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	f.clock.now = f.clock.now.Add(1 * time.Hour)
+	repo := &failingAssignmentRepo{AssignmentRepo: f.assignments, saveErr: errBoom}
+	end := &EndAssociateShift{Associates: f.associates, Assignments: repo, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	err := end.Execute(context.Background(), "assoc-1")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestEndAssociateShift_AssociatesSaveError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1", "pack")
+
+	assign := &AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	if _, err := assign.Execute(context.Background(), "assoc-1", "pack"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	f.clock.now = f.clock.now.Add(1 * time.Hour)
+	repo := &failingAssociateRepo{AssociateRepo: f.associates, saveErr: errBoom}
+	end := &EndAssociateShift{Associates: repo, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	err := end.Execute(context.Background(), "assoc-1")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+func TestEndAssociateShift_PublishError(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1")
+
+	pub := &failingPublisher{LogPublisher: f.pub, err: errBoom}
+	end := &EndAssociateShift{Associates: f.associates, Assignments: f.assignments, Events: pub, Clock: f.clock, MaxHoursPerShift: 8}
+	err := end.Execute(context.Background(), "assoc-1")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom, got %v", err)
+	}
+}
+
+// TestEndAssociateShift_NoActiveAssignment covers an associate who was
+// started but never assigned to a path: Assignments.FindByAssociateID
+// returns ports.ErrNotFound, la stays nil, and the shift still ends cleanly.
+func TestEndAssociateShift_NoActiveAssignment(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1")
+
+	end := &EndAssociateShift{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+	if err := end.Execute(context.Background(), "assoc-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	stored, _ := f.associates.FindByID(context.Background(), "assoc-1")
+	if !stored.Ended() {
+		t.Fatal("expected shift to be ended")
 	}
 }

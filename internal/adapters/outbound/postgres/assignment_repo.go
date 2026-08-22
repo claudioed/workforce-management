@@ -30,7 +30,7 @@ func (r *AssignmentRepo) Save(ctx context.Context, la *assignment.LaborAssignmen
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var activePathId *string
 	var activeStart *time.Time

@@ -65,3 +65,14 @@ Build the full bounded context described in CLAUDE.md, in order. Keep
   call POST /shift-plans with 2+ path lines and confirm 2+ messages land on
   the topic before declaring done.
 - Full existing suite (build/vet/test/-race) must still be green afterward.
+
+## Task 10 — Quality engineering: linting, coverage, integration tests, mutation tests, CI
+Full spec in QUALITY.md at the repo root. Five ordered stages, each gates the
+next: (1) golangci-lint clean via the committed .golangci.yml, (2) unit test
+coverage >= 90% on internal/domain/... + internal/application/... combined,
+(3) real integration tests against live Postgres for every outbound Postgres
+adapter, (4) gremlins mutation testing on internal/domain/... only
+(exploratory, triaged not gated), (5) .github/workflows/ci.yml — lint+unit+
+integration blocking on every push/PR, mutation testing on a weekly schedule/
+manual dispatch only, never blocking PRs. Do not stop until every stage's
+Definition of Done in QUALITY.md is met, then report the final numbers.

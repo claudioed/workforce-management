@@ -26,7 +26,7 @@ func (r *ShiftPlanRepo) Save(ctx context.Context, sp *shiftplan.ShiftPlan) error
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO shift_plan (building_id, shift_id) VALUES ($1, $2)
