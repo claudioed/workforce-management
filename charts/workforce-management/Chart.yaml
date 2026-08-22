@@ -1,0 +1,12 @@
+apiVersion: v2
+name: workforce-management
+description: Workforce Management — shift planning and labor assignment, stops deliberately at the path boundary
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/claudioed/workforce-management
+keywords:
+  - ddd
+  - hexagonal-architecture
+  - warehouse-management-system
+  - golang
