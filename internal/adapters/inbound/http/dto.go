@@ -77,6 +77,12 @@ func toStaffingGapResponse(g usecases.StaffingGap) staffingGapResponse {
 	}
 }
 
-type errorResponse struct {
-	Error string `json:"error"`
+// problemDetails is the RFC 7807 (Problem Details for HTTP APIs) response
+// body used for every error response in this service.
+type problemDetails struct {
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	Status   int    `json:"status"`
+	Detail   string `json:"detail"`
+	Instance string `json:"instance,omitempty"`
 }

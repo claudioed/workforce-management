@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -51,84 +52,125 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) startShift(w http.ResponseWriter, r *http.Request) {
-	associateId := chi.URLParam(r, "id")
+	associateId, err := shared.NewAssociateId(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
 
 	var req startShiftRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 
 	certs := make([]shared.Certification, len(req.Certifications))
 	for i, c := range req.Certifications {
-		certs[i] = shared.Certification(c)
+		cert, err := shared.NewCertification(c)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err)
+			return
+		}
+		certs[i] = cert
 	}
 
-	shift, err := h.StartAssociateShift.Execute(r.Context(), shared.AssociateId(associateId), certs)
+	shift, err := h.StartAssociateShift.Execute(r.Context(), associateId, certs)
 	if err != nil {
-		writeError(w, statusFor(err), err)
+		writeError(w, r, statusFor(err), err)
 		return
 	}
+	w.Header().Set("Location", "/associates/"+string(shift.AssociateId()))
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"associateId": string(shift.AssociateId()),
 	})
 }
 
 func (h *Handler) certify(w http.ResponseWriter, r *http.Request) {
-	associateId := chi.URLParam(r, "id")
-
-	var req certifyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	associateId, err := shared.NewAssociateId(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 
-	if err := h.CertifyAssociate.Execute(r.Context(), shared.AssociateId(associateId), shared.Certification(req.Certification)); err != nil {
-		writeError(w, statusFor(err), err)
+	var req certifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+
+	certification, err := shared.NewCertification(req.Certification)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+
+	if err := h.CertifyAssociate.Execute(r.Context(), associateId, certification); err != nil {
+		writeError(w, r, statusFor(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) proposePathPlan(w http.ResponseWriter, r *http.Request) {
-	pathId := chi.URLParam(r, "pathId")
+	pathId, err := shared.NewPathId(chi.URLParam(r, "pathId"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
 
 	var req proposePathPlanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if req.BuildingId == "" {
+		writeError(w, r, http.StatusBadRequest, errMissingBuildingId)
 		return
 	}
 
-	heads, err := h.ProposePathPlan.Execute(r.Context(), req.BuildingId, shared.PathId(pathId), req.Charge, req.PlannedRate)
+	heads, err := h.ProposePathPlan.Execute(r.Context(), req.BuildingId, pathId, req.Charge, req.PlannedRate)
 	if err != nil {
-		writeError(w, statusFor(err), err)
+		writeError(w, r, statusFor(err), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, proposePathPlanResponse{PathId: pathId, ProposedHeads: heads})
+	writeJSON(w, http.StatusOK, proposePathPlanResponse{PathId: string(pathId), ProposedHeads: heads})
 }
 
 func (h *Handler) commitShiftPlan(w http.ResponseWriter, r *http.Request) {
 	var req commitShiftPlanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if req.BuildingId == "" {
+		writeError(w, r, http.StatusBadRequest, errMissingBuildingId)
+		return
+	}
+	if req.ShiftId == "" {
+		writeError(w, r, http.StatusBadRequest, errMissingShiftId)
 		return
 	}
 
 	lines := make([]shiftplan.PathPlan, len(req.Lines))
 	installed := make(map[shared.PathId]int, len(req.Lines))
 	for i, l := range req.Lines {
+		pathId, err := shared.NewPathId(l.PathId)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err)
+			return
+		}
 		lines[i] = shiftplan.PathPlan{
-			PathId:       shared.PathId(l.PathId),
+			PathId:       pathId,
 			PlannedHeads: l.PlannedHeads,
 			PlannedRate:  l.PlannedRate,
 			PlannedHours: l.PlannedHours,
 		}
-		installed[shared.PathId(l.PathId)] = l.InstalledStations
+		installed[pathId] = l.InstalledStations
 	}
 
 	sp, err := h.CommitShiftPlan.Execute(r.Context(), req.BuildingId, req.ShiftId, lines, installed)
 	if err != nil {
-		writeError(w, statusFor(err), err)
+		writeError(w, r, statusFor(err), err)
 		return
 	}
 
@@ -141,6 +183,7 @@ func (h *Handler) commitShiftPlan(w http.ResponseWriter, r *http.Request) {
 			PlannedHours: l.PlannedHours,
 		})
 	}
+	w.Header().Set("Location", fmt.Sprintf("/shift-plans/%s/%s", sp.BuildingId(), sp.ShiftId()))
 	writeJSON(w, http.StatusCreated, shiftPlanResponse{
 		BuildingId: sp.BuildingId(),
 		ShiftId:    sp.ShiftId(),
@@ -149,41 +192,59 @@ func (h *Handler) commitShiftPlan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) assignLabor(w http.ResponseWriter, r *http.Request) {
-	associateId := chi.URLParam(r, "id")
+	associateId, err := shared.NewAssociateId(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
 
 	var req assignLaborRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
-
-	la, err := h.AssignLabor.Execute(r.Context(), shared.AssociateId(associateId), shared.PathId(req.PathId))
+	pathId, err := shared.NewPathId(req.PathId)
 	if err != nil {
-		writeError(w, statusFor(err), err)
+		writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
 
-	pathId, active := la.ActivePathId()
+	la, err := h.AssignLabor.Execute(r.Context(), associateId, pathId)
+	if err != nil {
+		writeError(w, r, statusFor(err), err)
+		return
+	}
+
+	activePathId, active := la.ActivePathId()
+	w.Header().Set("Location", "/associates/"+string(associateId)+"/assignments")
 	writeJSON(w, http.StatusCreated, assignmentResponse{
 		AssociateId:  string(la.AssociateId()),
-		ActivePathId: string(pathId),
+		ActivePathId: string(activePathId),
 		Active:       active,
 	})
 }
 
 func (h *Handler) startBreak(w http.ResponseWriter, r *http.Request) {
-	associateId := chi.URLParam(r, "id")
-	if err := h.StartBreak.Execute(r.Context(), shared.AssociateId(associateId)); err != nil {
-		writeError(w, statusFor(err), err)
+	associateId, err := shared.NewAssociateId(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.StartBreak.Execute(r.Context(), associateId); err != nil {
+		writeError(w, r, statusFor(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) endBreak(w http.ResponseWriter, r *http.Request) {
-	associateId := chi.URLParam(r, "id")
-	if err := h.EndBreak.Execute(r.Context(), shared.AssociateId(associateId)); err != nil {
-		writeError(w, statusFor(err), err)
+	associateId, err := shared.NewAssociateId(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.EndBreak.Execute(r.Context(), associateId); err != nil {
+		writeError(w, r, statusFor(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -193,22 +254,38 @@ func (h *Handler) endBreak(w http.ResponseWriter, r *http.Request) {
 // ShiftPlan is keyed by building+shift, so this context requires those as
 // query parameters alongside the path in the URL.
 func (h *Handler) staffingGap(w http.ResponseWriter, r *http.Request) {
-	pathId := chi.URLParam(r, "pathId")
-	buildingId := r.URL.Query().Get("buildingId")
-	shiftId := r.URL.Query().Get("shiftId")
-
-	gap, err := h.GetStaffingGap.Execute(r.Context(), buildingId, shiftId, shared.PathId(pathId))
+	pathId, err := shared.NewPathId(chi.URLParam(r, "pathId"))
 	if err != nil {
-		writeError(w, statusFor(err), err)
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	buildingId := r.URL.Query().Get("buildingId")
+	if buildingId == "" {
+		writeError(w, r, http.StatusBadRequest, errMissingBuildingId)
+		return
+	}
+	shiftId := r.URL.Query().Get("shiftId")
+	if shiftId == "" {
+		writeError(w, r, http.StatusBadRequest, errMissingShiftId)
+		return
+	}
+
+	gap, err := h.GetStaffingGap.Execute(r.Context(), buildingId, shiftId, pathId)
+	if err != nil {
+		writeError(w, r, statusFor(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toStaffingGapResponse(gap))
 }
 
 func (h *Handler) endShift(w http.ResponseWriter, r *http.Request) {
-	associateId := chi.URLParam(r, "id")
-	if err := h.EndAssociateShift.Execute(r.Context(), shared.AssociateId(associateId)); err != nil {
-		writeError(w, statusFor(err), err)
+	associateId, err := shared.NewAssociateId(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.EndAssociateShift.Execute(r.Context(), associateId); err != nil {
+		writeError(w, r, statusFor(err), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -220,6 +297,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, errorResponse{Error: err.Error()})
+// writeError writes an RFC 7807 (application/problem+json) error response.
+// category is looked up from err (falling back to a status-keyed generic
+// category); detail carries the existing dynamic err.Error() text; instance
+// is the request path that produced the error.
+func writeError(w http.ResponseWriter, r *http.Request, status int, err error) {
+	cat := categoryFor(status, err)
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(problemDetails{
+		Type:     problemErrorsURIBase + "/" + cat.slug,
+		Title:    cat.title,
+		Status:   status,
+		Detail:   err.Error(),
+		Instance: r.URL.Path,
+	})
 }

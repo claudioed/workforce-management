@@ -1,0 +1,857 @@
+openapi: 3.0.3
+info:
+  title: Workforce Management API
+  version: "1.0.0"
+  contact:
+    name: claudioed
+    email: claudioed.oliveira@gmail.com
+  description: |
+    Workforce Management is a Supporting bounded context that owns "who is on
+    shift, on which process path, at what rate; direct vs indirect hours."
+
+    It covers two things:
+
+    1. **The shift-start planning horizon** — a human proposes and then
+       commits a split of headcount across process paths (`ShiftPlan`, made
+       of `PathPlan` lines: path, planned heads, planned rate, planned
+       hours), one plan per building per shift.
+    2. **Intra-shift assignment tracking** — moving associates between paths
+       as backlogs deviate from plan (`LaborAssignment`). The move itself is
+       always a human call; this context makes the staffing gap legible
+       (`GetStaffingGap` / `PathUnderstaffed`), it never decides or performs
+       a rebalance on its own.
+
+    Three aggregates back the API: `AssociateShift` (roster entry —
+    certifications, break state, logged hours), `ShiftPlan` (committed
+    headcount split across paths), and `LaborAssignment` (one associate, one
+    path, an interval — exactly one ACTIVE assignment per associate at a
+    time, and an assignment is rejected if the associate lacks the path's
+    required certification).
+
+    **Where this context's boundary stops:** it never links an associate to
+    a specific task, and it never dispatches work — that is Fulfillment
+    Execution's job, against a completely different cadence (shifts/hours
+    here vs. seconds there for task claiming). Keeping the seam at "this
+    associate is on this path" lets task-dispatch policy change without
+    touching workforce planning, and vice versa.
+
+    All error responses use RFC 7807 (`application/problem+json`); see the
+    shared `Problem` schema.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+security: []
+tags:
+  - name: Associates
+    description: >-
+      The AssociateShift aggregate: starting/ending a roster entry for a
+      shift, certifications, and break state.
+  - name: Shift Plans
+    description: >-
+      The ShiftPlan aggregate: proposing and committing the headcount split
+      across process paths for one building's shift.
+  - name: Assignments
+    description: >-
+      The LaborAssignment aggregate: putting an associate on a path for an
+      interval, enforcing the certification gate and the one-active-
+      assignment-per-associate invariant.
+  - name: Staffing
+    description: >-
+      Read model surfacing the gap between a path's committed plannedHeads
+      and its currently active assignments.
+  - name: System
+    description: Operational endpoints not scoped to a domain aggregate.
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness check
+      description: >-
+        Returns 200 with a static status body if the process is up and
+        serving. Does not check downstream dependencies (e.g. Postgres
+        connectivity) — it is a liveness probe, not a readiness probe.
+      tags: [System]
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthzResponse"
+              example:
+                status: ok
+
+  /associates/{id}/start-shift:
+    post:
+      operationId: startAssociateShift
+      summary: Start an associate's shift
+      description: >-
+        Creates a new AssociateShift roster entry for this shift, with an
+        initial set of certifications, raising AssociateShiftStarted. The
+        associate id is client-supplied and this endpoint is naturally
+        idempotent by that id: calling it twice for the same associate
+        upserts the roster entry rather than erroring (each call still
+        re-raises AssociateShiftStarted and returns 201).
+      tags: [Associates]
+      parameters:
+        - $ref: "#/components/parameters/AssociateId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartShiftRequest"
+            example:
+              certifications: ["pack"]
+      responses:
+        "201":
+          description: >-
+            Shift started. Location points at the associate resource
+            (this service has no GET route for an individual associate yet;
+            the URI identifies the resource per RFC 7231 §7.1.2 regardless).
+          headers:
+            Location:
+              description: URI of the started associate's shift resource.
+              schema:
+                type: string
+                example: /associates/assoc-1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StartShiftResponse"
+              example:
+                associateId: assoc-1
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /associates/{id}/certifications:
+    post:
+      operationId: certifyAssociate
+      summary: Add a certification to an associate
+      description: >-
+        Adds a named qualification (e.g. "pack", "hazmat", "pick") to an
+        already-started AssociateShift, raising AssociateCertified. An
+        associate untrained on a path cannot be assigned to it (see
+        POST /associates/{id}/assignments). Adding a certification the
+        associate already holds is a no-op on state (set semantics) but
+        still re-raises the event and returns 204 — certifications are not
+        independently addressable sub-resources, so this returns 204 rather
+        than 201.
+      tags: [Associates]
+      parameters:
+        - $ref: "#/components/parameters/AssociateId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CertifyRequest"
+            example:
+              certification: hazmat
+      responses:
+        "204":
+          description: Certification added. No response body.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >-
+            Conflict — the associate's shift has already ended
+            (associate-shift-ended).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.workforce-management.warehouse-systems.dev/associate-shift-ended
+                title: Associate shift has already ended
+                status: 409
+                detail: associate shift has already ended
+                instance: /associates/assoc-1/certifications
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /paths/{pathId}/plan/propose:
+    post:
+      operationId: proposePathPlan
+      summary: Propose planned heads for a path (pure computation, not committed)
+      description: >-
+        Computes `heads = ceil(charge / plannedRate)` for one path and
+        raises ShiftPlanProposed for visibility — it persists nothing and
+        commits nothing. A human must still call POST /shift-plans to commit
+        an actual ShiftPlan. This is why the response is 200, not 201: no
+        resource is created.
+      tags: [Shift Plans]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProposePathPlanRequest"
+            example:
+              buildingId: bldg-1
+              charge: 100
+              plannedRate: 30
+      responses:
+        "200":
+          description: Proposed heads for this path, not committed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProposePathPlanResponse"
+              example:
+                pathId: pack
+                proposedHeads: 4
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shift-plans:
+    post:
+      operationId: commitShiftPlan
+      summary: Commit a shift's headcount split across paths
+      description: >-
+        Commits a human-decided ShiftPlan: one or more PathPlan lines
+        (path, plannedHeads, plannedRate, plannedHours), raising
+        ShiftPlanCommitted. Validates, per line, that plannedHeads does not
+        exceed the caller-supplied installedStations for that path (this
+        context enforces the invariant independently — it has no dependency
+        on Work Planning, which owns installed-station counts — the request
+        carries the number it needs), and that plannedHours does not exceed
+        plannedHeads * the configured max hours per shift. Naturally
+        idempotent by the client-supplied (buildingId, shiftId) key: the
+        underlying repository upserts on that key.
+      tags: [Shift Plans]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommitShiftPlanRequest"
+            example:
+              buildingId: bldg-1
+              shiftId: shift-1
+              lines:
+                - pathId: pack
+                  plannedHeads: 3
+                  plannedRate: 30
+                  plannedHours: 24
+                  installedStations: 10
+                - pathId: pick
+                  plannedHeads: 2
+                  plannedRate: 25
+                  plannedHours: 16
+                  installedStations: 10
+      responses:
+        "201":
+          description: Shift plan committed.
+          headers:
+            Location:
+              description: URI of the committed shift plan.
+              schema:
+                type: string
+                example: /shift-plans/bldg-1/shift-1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShiftPlanResponse"
+              example:
+                buildingId: bldg-1
+                shiftId: shift-1
+                lines:
+                  - pathId: pack
+                    plannedHeads: 3
+                    plannedRate: 30
+                    plannedHours: 24
+        "400":
+          description: >-
+            Malformed body, an empty required field (buildingId, shiftId, or
+            a line's pathId), no path plan lines supplied
+            (shift-plan-no-path-plans), or a line references a path with no
+            installedStations entry (shift-plan-missing-installed-stations).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.workforce-management.warehouse-systems.dev/shift-plan-no-path-plans
+                title: Shift plan must have at least one path plan line
+                status: 400
+                detail: shift plan must have at least one path plan line
+                instance: /shift-plans
+        "409":
+          description: >-
+            Conflict — a line's plannedHeads exceeds installedStations
+            (planned-heads-exceed-installed), or plannedHours exceeds what
+            plannedHeads can work within the shift's max hours
+            (planned-hours-exceed-capacity).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.workforce-management.warehouse-systems.dev/planned-heads-exceed-installed
+                title: Planned heads exceed installed stations for path
+                status: 409
+                detail: planned heads exceed installed stations for path
+                instance: /shift-plans
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /associates/{id}/assignments:
+    post:
+      operationId: assignLabor
+      summary: Assign an associate to a path
+      description: >-
+        Puts an associate on pathId for a new interval, raising LaborAssigned
+        (first assignment) or LaborReassigned (an assignment was already
+        active). The "exactly one ACTIVE assignment per associate" invariant
+        is enforced by construction, not by rejecting a second call: if the
+        associate already has an active assignment, it is closed first (its
+        hours are logged against the associate's shift) and the new one
+        starts — this matches how rebalancing actually happens on the floor,
+        a supervisor moves someone without first "unassigning" them. The
+        assignment requires the associate hold the path's required
+        certification (by convention, the Certification with the same name
+        as the PathId — e.g. path "pack" requires certification "pack"), and
+        is rejected if the associate is currently on a logged break or their
+        shift has ended.
+      tags: [Assignments]
+      parameters:
+        - $ref: "#/components/parameters/AssociateId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssignLaborRequest"
+            example:
+              pathId: pack
+      responses:
+        "201":
+          description: >-
+            Associate assigned. Location points at this associate's
+            assignment resource (at most one active assignment exists per
+            associate, so the collection URI identifies it).
+          headers:
+            Location:
+              description: URI of the associate's assignment resource.
+              schema:
+                type: string
+                example: /associates/assoc-1/assignments
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssignmentResponse"
+              example:
+                associateId: assoc-1
+                activePathId: pack
+                active: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >-
+            Conflict — the associate lacks the required certification for
+            this path (certification-required), is currently on a logged
+            break (associate-on-break), their shift has ended
+            (associate-shift-ended), or closing the prior active assignment
+            would push logged hours over the configured max per shift
+            (max-hours-exceeded).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.workforce-management.warehouse-systems.dev/certification-required
+                title: Associate lacks the certification required for this path
+                status: 409
+                detail: associate lacks the certification required for this path
+                instance: /associates/assoc-1/assignments
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /associates/{id}/break/start:
+    post:
+      operationId: startAssociateBreak
+      summary: Start a logged break for an associate
+      description: >-
+        Begins a logged break for the associate, raising
+        AssociateBreakStarted. While on break, the associate cannot receive
+        a new labor assignment (see POST /associates/{id}/assignments). Not
+        idempotent: calling this while already on break is rejected as a
+        conflict rather than treated as a no-op, since it represents a
+        discrete state transition, not an upsert.
+      tags: [Associates]
+      parameters:
+        - $ref: "#/components/parameters/AssociateId"
+      responses:
+        "204":
+          description: Break started. No response body.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >-
+            Conflict — the associate is already on break
+            (associate-already-on-break), or their shift has already ended
+            (associate-shift-ended).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.workforce-management.warehouse-systems.dev/associate-already-on-break
+                title: Associate is already on break
+                status: 409
+                detail: associate is already on break
+                instance: /associates/assoc-1/break/start
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /associates/{id}/break/end:
+    post:
+      operationId: endAssociateBreak
+      summary: End a logged break for an associate
+      description: >-
+        Ends the associate's current logged break, raising
+        AssociateBreakEnded. Not idempotent: calling this while not on break
+        is rejected as a conflict rather than treated as a no-op.
+      tags: [Associates]
+      parameters:
+        - $ref: "#/components/parameters/AssociateId"
+      responses:
+        "204":
+          description: Break ended. No response body.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >-
+            Conflict — the associate is not currently on break
+            (associate-not-on-break), or their shift has already ended
+            (associate-shift-ended).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.workforce-management.warehouse-systems.dev/associate-not-on-break
+                title: Associate is not on break
+                status: 409
+                detail: associate is not on break
+                instance: /associates/assoc-1/break/end
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /paths/{pathId}/staffing-gap:
+    get:
+      operationId: getStaffingGap
+      summary: Get the staffing gap for a path within a committed shift plan
+      description: >-
+        Read-model projection: plannedHeads (from the committed ShiftPlan
+        for buildingId+shiftId) vs. currently active LaborAssignment count
+        for pathId. Raises PathUnderstaffed when active assignments fall
+        short of plannedHeads. This surfaces the gap only — it never decides
+        or performs a rebalance; that stays a human call recorded via
+        POST /associates/{id}/assignments. ShiftPlan is keyed by
+        building+shift, so both are required as query parameters alongside
+        the path in the URL — a path's planned heads only make sense within
+        one committed plan.
+      tags: [Staffing]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - name: buildingId
+          in: query
+          required: true
+          description: The building whose committed shift plan to read.
+          schema:
+            type: string
+          example: bldg-1
+        - name: shiftId
+          in: query
+          required: true
+          description: The shift (within buildingId) whose committed plan to read.
+          schema:
+            type: string
+          example: shift-1
+      responses:
+        "200":
+          description: Staffing gap for this path within the committed plan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaffingGapResponse"
+              example:
+                pathId: pack
+                plannedHeads: 3
+                activeHeads: 1
+                understaffed: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: >-
+            No committed ShiftPlan exists for buildingId+shiftId
+            (resource-not-found).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.workforce-management.warehouse-systems.dev/resource-not-found
+                title: Resource not found
+                status: 404
+                detail: not found
+                instance: /paths/pack/staffing-gap
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /associates/{id}/end-shift:
+    post:
+      operationId: endAssociateShift
+      summary: End an associate's shift
+      description: >-
+        Closes the associate's shift, raising AssociateShiftEnded. Any
+        currently active LaborAssignment is closed first (its hours logged
+        against the shift). Idempotent: ending an already-ended shift is a
+        no-op — no error, no event, still 204.
+      tags: [Associates]
+      parameters:
+        - $ref: "#/components/parameters/AssociateId"
+      responses:
+        "204":
+          description: Shift ended (or was already ended). No response body.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >-
+            Conflict — closing the active assignment's hours would exceed
+            the configured max hours per shift (max-hours-exceeded).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.workforce-management.warehouse-systems.dev/max-hours-exceeded
+                title: Max hours per shift exceeded
+                status: 409
+                detail: logging these hours would exceed the max hours per shift
+                instance: /associates/assoc-1/end-shift
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+components:
+  parameters:
+    AssociateId:
+      name: id
+      in: path
+      required: true
+      description: The associate's identity (AssociateId).
+      schema:
+        type: string
+        minLength: 1
+      example: assoc-1
+    PathId:
+      name: pathId
+      in: path
+      required: true
+      description: >-
+        The process path's identity (e.g. "pack", "pick", "stow"). By
+        convention, the Certification required to be assigned to a path has
+        the same name as the PathId.
+      schema:
+        type: string
+        minLength: 1
+      example: pack
+
+  responses:
+    BadRequest:
+      description: >-
+        Malformed JSON body, or a required field was missing/empty
+        (empty-associate-id, empty-path-id, empty-certification,
+        missing-building-id, missing-shift-id, or malformed-request-body).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.workforce-management.warehouse-systems.dev/empty-certification
+            title: Certification must not be empty
+            status: 400
+            detail: certification must not be empty
+            instance: /associates/assoc-1/start-shift
+    NotFound:
+      description: The referenced associate has no started shift (resource-not-found).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.workforce-management.warehouse-systems.dev/resource-not-found
+            title: Resource not found
+            status: 404
+            detail: not found
+            instance: /associates/ghost/certifications
+    InternalError:
+      description: >-
+        Unclassified failure (e.g. a persistence or event-publish error) —
+        internal-error.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.workforce-management.warehouse-systems.dev/internal-error
+            title: Internal server error
+            status: 500
+            detail: connection refused
+            instance: /shift-plans
+
+  schemas:
+    Problem:
+      type: object
+      description: >-
+        RFC 7807 (https://www.rfc-editor.org/rfc/rfc7807) Problem Details for
+        HTTP APIs. Used for every error response in this service, with
+        Content-Type: application/problem+json.
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: >-
+            A URI identifying the error CATEGORY (not this specific
+            occurrence). Does not need to resolve to a real page.
+          example: https://errors.workforce-management.warehouse-systems.dev/associate-shift-ended
+        title:
+          type: string
+          description: Fixed, category-level human-readable summary.
+          example: Associate shift has already ended
+        status:
+          type: integer
+          format: int32
+          description: The HTTP status code, duplicated here per RFC 7807.
+          example: 409
+        detail:
+          type: string
+          description: The specific error message for this occurrence.
+          example: associate shift has already ended
+        instance:
+          type: string
+          description: The request path that produced this error.
+          example: /associates/assoc-1/certifications
+
+    HealthzResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+
+    StartShiftRequest:
+      type: object
+      properties:
+        certifications:
+          type: array
+          description: >-
+            Initial certifications the associate holds at shift start.
+            May be empty — certifications can be added later via
+            POST /associates/{id}/certifications. Each entry must be
+            non-empty.
+          items:
+            type: string
+            minLength: 1
+          example: ["pack", "hazmat"]
+      example:
+        certifications: ["pack"]
+
+    StartShiftResponse:
+      type: object
+      required: [associateId]
+      properties:
+        associateId:
+          type: string
+          example: assoc-1
+
+    CertifyRequest:
+      type: object
+      required: [certification]
+      properties:
+        certification:
+          type: string
+          minLength: 1
+          description: The certification name to add (e.g. "hazmat").
+          example: hazmat
+
+    ProposePathPlanRequest:
+      type: object
+      required: [buildingId, charge, plannedRate]
+      properties:
+        buildingId:
+          type: string
+          minLength: 1
+          example: bldg-1
+        charge:
+          type: number
+          format: double
+          description: The volume of work (units) to be covered on this path.
+          example: 100
+        plannedRate:
+          type: number
+          format: double
+          description: Planned units-per-head throughput rate for this path.
+          example: 30
+
+    ProposePathPlanResponse:
+      type: object
+      required: [pathId, proposedHeads]
+      properties:
+        pathId:
+          type: string
+          example: pack
+        proposedHeads:
+          type: integer
+          description: ceil(charge / plannedRate). Not committed.
+          example: 4
+
+    PathPlanLineRequest:
+      type: object
+      required: [pathId, plannedHeads, plannedRate, plannedHours, installedStations]
+      properties:
+        pathId:
+          type: string
+          minLength: 1
+          example: pack
+        plannedHeads:
+          type: integer
+          description: Committed headcount for this path.
+          example: 3
+        plannedRate:
+          type: number
+          format: double
+          example: 30
+        plannedHours:
+          type: number
+          format: double
+          description: >-
+            Total committed hours for this path. Must not exceed
+            plannedHeads * the configured max hours per shift.
+          example: 24
+        installedStations:
+          type: integer
+          description: >-
+            Physical stations installed on this path, supplied by the
+            caller (this context has no dependency on Work Planning, which
+            owns this number). plannedHeads must not exceed this.
+          example: 10
+
+    CommitShiftPlanRequest:
+      type: object
+      required: [buildingId, shiftId, lines]
+      properties:
+        buildingId:
+          type: string
+          minLength: 1
+          example: bldg-1
+        shiftId:
+          type: string
+          minLength: 1
+          example: shift-1
+        lines:
+          type: array
+          minItems: 1
+          description: >-
+            One or more path plan lines. Must contain at least one line
+            (shift-plan-no-path-plans if empty).
+          items:
+            $ref: "#/components/schemas/PathPlanLineRequest"
+
+    PathPlanLineResponse:
+      type: object
+      required: [pathId, plannedHeads, plannedRate, plannedHours]
+      properties:
+        pathId:
+          type: string
+          example: pack
+        plannedHeads:
+          type: integer
+          example: 3
+        plannedRate:
+          type: number
+          format: double
+          example: 30
+        plannedHours:
+          type: number
+          format: double
+          example: 24
+
+    ShiftPlanResponse:
+      type: object
+      required: [buildingId, shiftId, lines]
+      properties:
+        buildingId:
+          type: string
+          example: bldg-1
+        shiftId:
+          type: string
+          example: shift-1
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/PathPlanLineResponse"
+
+    AssignLaborRequest:
+      type: object
+      required: [pathId]
+      properties:
+        pathId:
+          type: string
+          minLength: 1
+          description: The path to assign the associate to.
+          example: pack
+
+    AssignmentResponse:
+      type: object
+      required: [associateId, active]
+      properties:
+        associateId:
+          type: string
+          example: assoc-1
+        activePathId:
+          type: string
+          description: The path of the current active assignment, if any.
+          example: pack
+        active:
+          type: boolean
+          description: Whether the associate currently has an active assignment.
+          example: true
+
+    StaffingGapResponse:
+      type: object
+      required: [pathId, plannedHeads, activeHeads, understaffed]
+      properties:
+        pathId:
+          type: string
+          example: pack
+        plannedHeads:
+          type: integer
+          example: 3
+        activeHeads:
+          type: integer
+          example: 1
+        understaffed:
+          type: boolean
+          example: true

@@ -135,6 +135,34 @@ curl -X POST localhost:8080/associates/assoc-1/end-shift
 curl localhost:8080/healthz
 ```
 
+## Errors
+
+Every error response is [RFC 7807](https://www.rfc-editor.org/rfc/rfc7807)
+`application/problem+json`, not a bespoke shape:
+
+```bash
+curl -i -X POST localhost:8080/associates/ghost/certifications \
+  -d '{"certification":"hazmat"}'
+```
+
+```
+HTTP/1.1 404 Not Found
+Content-Type: application/problem+json
+
+{
+  "type": "https://errors.workforce-management.warehouse-systems.dev/resource-not-found",
+  "title": "Resource not found",
+  "status": 404,
+  "detail": "not found",
+  "instance": "/associates/ghost/certifications"
+}
+```
+
+`type` identifies the error CATEGORY (fixed per sentinel domain error, not
+per occurrence) and does not need to resolve; `title` is the fixed
+category-level summary; `detail` carries the specific `err.Error()` text for
+this occurrence; `instance` is the request path.
+
 ## Integration
 
 This service can publish `ShiftPlanCommitted` to the shared warehouse-systems

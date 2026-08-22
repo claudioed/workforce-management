@@ -71,6 +71,22 @@ func TestStartShift(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
+	if loc := rec.Header().Get("Location"); loc != "/associates/assoc-1" {
+		t.Fatalf("expected Location /associates/assoc-1, got %q", loc)
+	}
+}
+
+// TestStartShift_RejectsEmptyCertification is an HTTP-layer validation test:
+// the decoded DTO is validated (via shared.NewCertification) before the use
+// case runs, so an empty certification string is rejected as 400 RFC 7807
+// rather than reaching the domain/use-case layer.
+func TestStartShift_RejectsEmptyCertification(t *testing.T) {
+	router := NewRouter(newTestHandler())
+	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{Certifications: []string{""}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusBadRequest, "empty-certification", "/associates/assoc-1/start-shift")
 }
 
 func TestCertify(t *testing.T) {
@@ -89,6 +105,7 @@ func TestCertify_NotFound(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
+	assertProblemDetails(t, rec, http.StatusNotFound, "resource-not-found", "/associates/ghost/certifications")
 }
 
 func TestProposePathPlan(t *testing.T) {
@@ -119,6 +136,9 @@ func TestCommitShiftPlan(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
+	if loc := rec.Header().Get("Location"); loc != "/shift-plans/bldg-1/shift-1" {
+		t.Fatalf("expected Location /shift-plans/bldg-1/shift-1, got %q", loc)
+	}
 }
 
 // TestCommitShiftPlan_RejectsPlannedHeadsExceedingInstalledStations is a
@@ -136,6 +156,26 @@ func TestCommitShiftPlan_RejectsPlannedHeadsExceedingInstalledStations(t *testin
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
+	assertProblemDetails(t, rec, http.StatusConflict, "planned-heads-exceed-installed", "/shift-plans")
+}
+
+// TestCommitShiftPlan_RejectsMissingBuildingId is an HTTP-layer validation
+// test: buildingId/shiftId have no domain value object (ShiftPlan stores
+// them as plain strings), so the adapter itself must reject an empty
+// buildingId as 400 before calling the use case.
+func TestCommitShiftPlan_RejectsMissingBuildingId(t *testing.T) {
+	router := NewRouter(newTestHandler())
+	req := commitShiftPlanRequest{
+		ShiftId: "shift-1",
+		Lines: []pathPlanLineRequest{
+			{PathId: "pack", PlannedHeads: 5, PlannedRate: 30, PlannedHours: 40, InstalledStations: 10},
+		},
+	}
+	rec := doRequest(t, router, http.MethodPost, "/shift-plans", req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusBadRequest, "missing-building-id", "/shift-plans")
 }
 
 func TestAssignLabor(t *testing.T) {
@@ -145,6 +185,9 @@ func TestAssignLabor(t *testing.T) {
 	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/assignments", assignLaborRequest{PathId: "pack"})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/associates/assoc-1/assignments" {
+		t.Fatalf("expected Location /associates/assoc-1/assignments, got %q", loc)
 	}
 }
 
@@ -158,6 +201,7 @@ func TestAssignLabor_RejectsMissingCertification(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
+	assertProblemDetails(t, rec, http.StatusConflict, "certification-required", "/associates/assoc-1/assignments")
 }
 
 // TestAssignLabor_RejectsWhileOnBreak is a Definition-of-Done named
@@ -219,5 +263,51 @@ func TestEndShift(t *testing.T) {
 	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/end-shift", nil)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMalformedRequestBody is an HTTP-layer validation test covering the
+// generic (non-domain-sentinel) RFC 7807 category: malformed JSON falls
+// back to the status-keyed "malformed-request-body" category.
+func TestMalformedRequestBody(t *testing.T) {
+	router := NewRouter(newTestHandler())
+	req := httptest.NewRequest(http.MethodPost, "/associates/assoc-1/start-shift", bytes.NewReader([]byte("{not json")))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusBadRequest, "malformed-request-body", "/associates/assoc-1/start-shift")
+}
+
+// assertProblemDetails asserts rec's body is a well-formed RFC 7807 problem
+// document (Content-Type: application/problem+json) matching status and
+// wantSlug (the last path segment of "type"), with instance == wantInstance.
+func assertProblemDetails(t *testing.T, rec *httptest.ResponseRecorder, status int, wantSlug, wantInstance string) {
+	t.Helper()
+	if ct := rec.Header().Get("Content-Type"); ct != "application/problem+json" {
+		t.Fatalf("expected Content-Type application/problem+json, got %q", ct)
+	}
+	var pd problemDetails
+	if err := json.Unmarshal(rec.Body.Bytes(), &pd); err != nil {
+		t.Fatalf("unmarshal problem details: %v", err)
+	}
+	wantType := problemErrorsURIBase + "/" + wantSlug
+	if pd.Type != wantType {
+		t.Fatalf("expected type %q, got %q", wantType, pd.Type)
+	}
+	if pd.Status != status {
+		t.Fatalf("expected status %d, got %d", status, pd.Status)
+	}
+	if pd.Title == "" {
+		t.Fatalf("expected non-empty title")
+	}
+	if pd.Detail == "" {
+		t.Fatalf("expected non-empty detail")
+	}
+	if pd.Instance != wantInstance {
+		t.Fatalf("expected instance %q, got %q", wantInstance, pd.Instance)
 	}
 }
