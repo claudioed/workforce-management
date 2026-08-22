@@ -254,3 +254,30 @@ dedicated failing-path test, at both the domain and use-case/HTTP layers:
   `associate.TestCanBeAssigned_RejectsWhileOnBreak`,
   `usecases.TestAssignLabor_RejectsWhileOnBreak`,
   `http.TestAssignLabor_RejectsWhileOnBreak`.
+
+## BDD / Acceptance tests
+
+Executable specifications live in [`features/`](features/) as Gherkin
+`.feature` files and are run with [godog](https://github.com/cucumber/godog),
+the official Cucumber implementation for Go. They drive the **real REST API**
+end-to-end: the chi router is wired to the in-memory adapters (memory repos, a
+buffered event publisher, a fixed clock), served over an `httptest.Server`, and
+exercised with real `net/http` calls — nothing reaches past the HTTP boundary,
+so the scenarios document the published contract rather than internal wiring.
+Each scenario gets a fresh server and fresh repositories, so they are
+independent and order-free.
+
+```bash
+go test ./... -run TestFeatures -v
+```
+
+| Feature file | Covers |
+| --- | --- |
+| `features/shift_plan.feature` | `CommitShiftPlan` — within capacity, and rejected when `plannedHeads` exceed installed stations |
+| `features/labor_assignment.feature` | `AssignLabor` — certified assignment, uncertified rejection, no double-booking, and rejection while on break |
+| `features/breaks.feature` | `StartBreak` / `EndBreak` — break state gates assignment, then releases it |
+| `features/staffing_gap.feature` | `GetStaffingGap` — a path below plan is flagged `PathUnderstaffed` |
+
+Step definitions and the suite entry point (`TestFeatures`) are in
+[`features_test.go`](features_test.go) at the repo root. CI runs them as a
+dedicated `bdd` job.
