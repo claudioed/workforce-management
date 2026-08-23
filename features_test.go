@@ -63,7 +63,7 @@ func newServer() *httptest.Server {
 		EndAssociateShift:   &usecases.EndAssociateShift{Associates: associates, Assignments: assignments, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
 	}
 
-	return httptest.NewServer(inboundhttp.NewRouter(handler, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	return httptest.NewServer(inboundhttp.NewRouter(handler, slog.New(slog.NewTextHandler(io.Discard, nil)), ""))
 }
 
 // world is the per-scenario state: the server under test plus the most

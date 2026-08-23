@@ -20,9 +20,16 @@ import (
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/postgres"
+	"github.com/claudioed/workforce-management/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/workforce-management/internal/application/ports"
 	"github.com/claudioed/workforce-management/internal/application/usecases"
 )
+
+// version is the service version reported as the OTel `service.version`
+// resource attribute. It is overridable at build time
+// (-ldflags "-X main.version=1.2.3") and otherwise falls back to the
+// SERVICE_VERSION env var, then "dev".
+var version = ""
 
 func main() {
 	if err := run(); err != nil {
@@ -46,12 +53,50 @@ func newLogger(level string) *slog.Logger {
 	default:
 		lvl = slog.LevelInfo
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+	// TraceHandler wraps the JSON handler so any *Context log call made while
+	// a span is active also carries trace_id/span_id.
+	return slog.New(telemetry.NewTraceHandler(
+		slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}),
+	))
+}
+
+// serviceVersion resolves service.version: build-time ldflags first, then
+// SERVICE_VERSION, then "dev".
+func serviceVersion() string {
+	if version != "" {
+		return version
+	}
+	return envOrDefault("SERVICE_VERSION", "dev")
 }
 
 func run() error {
 	logger := newLogger(envOrDefault("LOG_LEVEL", "info"))
 	slog.SetDefault(logger)
+
+	ctx := context.Background()
+
+	serviceName := envOrDefault("OTEL_SERVICE_NAME", inbound.DefaultServiceName)
+	otlpEndpoint := envOrDefault("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultOTLPEndpoint)
+	shutdownTelemetry, err := telemetry.Setup(ctx, serviceName, serviceVersion(), otlpEndpoint)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// Warn, not Error: the usual cause is "no Collector listening at
+		// OTEL_EXPORTER_OTLP_ENDPOINT", which drops the final flush but is
+		// not a service failure.
+		if err := shutdownTelemetry(shutdownCtx); err != nil {
+			logger.Warn("telemetry shutdown did not flush cleanly", "error", err)
+		}
+	}()
+	logger.Info("telemetry configured",
+		"service_name", serviceName,
+		"service_version", serviceVersion(),
+		"environment", telemetry.Environment(),
+		"otlp_endpoint", otlpEndpoint,
+	)
 
 	databaseURL := requireEnv("DATABASE_URL")
 	httpAddr := envOrDefault("HTTP_ADDR", ":8080")
@@ -62,7 +107,6 @@ func run() error {
 		return err
 	}
 
-	ctx := context.Background()
 	pool, err := postgres.NewPool(ctx, databaseURL)
 	if err != nil {
 		return err
@@ -94,7 +138,7 @@ func run() error {
 
 	server := &http.Server{
 		Addr:              httpAddr,
-		Handler:           inbound.NewRouter(handler, logger),
+		Handler:           inbound.NewRouter(handler, logger, serviceName),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

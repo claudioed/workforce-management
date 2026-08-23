@@ -30,7 +30,13 @@ type AssignLabor struct {
 }
 
 // Execute assigns associateId to pathId.
-func (uc *AssignLabor) Execute(ctx context.Context, associateId shared.AssociateId, pathId shared.PathId) (*assignment.LaborAssignment, error) {
+//
+// Every attempt — accepted or rejected — is counted on the
+// workforce.labor_assignments metric. That is observation only: it does not
+// change what this use case decides or returns.
+func (uc *AssignLabor) Execute(ctx context.Context, associateId shared.AssociateId, pathId shared.PathId) (result *assignment.LaborAssignment, err error) {
+	defer func() { recordLaborAssignment(ctx, pathId, err) }()
+
 	shift, err := uc.Associates.FindByID(ctx, associateId)
 	if err != nil {
 		return nil, err
