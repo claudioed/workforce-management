@@ -8,10 +8,31 @@ import Heading from '@theme/Heading';
 import HomepageFeatures from '@site/src/components/HomepageFeatures';
 import styles from './index.module.css';
 
+function StudyDisclaimer() {
+  return (
+    <div
+      style={{
+        background: '#fef3c7',
+        color: '#78350f',
+        textAlign: 'center',
+        padding: '0.6rem 1rem',
+        fontSize: '0.9rem',
+        borderBottom: '1px solid #f59e0b',
+      }}>
+      ⚠️ <strong>Study project</strong> — an educational DDD exercise
+      following real industry-standard patterns (WMS/WES/WCS,
+      certification-gated assignment, CloudEvents). Not a production
+      system. Not affiliated with, endorsed by, or representative of Amazon
+      or any other company.
+    </div>
+  );
+}
+
 function HomepageHeader() {
   const {siteConfig} = useDocusaurusContext();
   return (
     <header className={clsx('hero', styles.heroBanner)}>
+      <StudyDisclaimer />
       <div className="container">
         <p className={styles.eyebrow}>
           warehouse-systems · Supporting bounded context
