@@ -11,9 +11,10 @@ package for structured logging.
 - **Go ecosystem standard.** `slog` is the community-converged structured
   logging API; libraries and tooling increasingly accept or emit
   `*slog.Logger` / `slog.Handler` directly.
-- **OTel-bridge ready.** OpenTelemetry's Go logs bridge (and most
-  observability vendors) can consume an `slog.Handler`, so this service can
-  gain trace-correlated log export later without changing call sites.
+- **Composable handlers.** A `slog.Handler` is an interface, so trace
+  correlation is a wrapper (`telemetry.TraceHandler`) around the JSON
+  handler rather than a change to any call site — see
+  [Trace correlation](#trace-correlation) below.
 - `zerolog` and `zap` were considered and rejected: this is a
   moderate-throughput CRUD/event-driven service, not a hot-path log
   producer, so their extra allocation-avoidance machinery is unneeded
@@ -35,7 +36,7 @@ Logs are emitted as single-line JSON to stdout via
 
 ```json
 {"time":"2026-08-23T12:00:00Z","level":"INFO","msg":"http server listening","addr":":8080"}
-{"time":"2026-08-23T12:00:01Z","level":"INFO","msg":"http request","method":"GET","path":"/healthz","status":200,"duration_ms":0,"bytes":16,"request_id":"abc123"}
+{"time":"2026-08-23T12:00:01Z","level":"INFO","msg":"http request","method":"GET","path":"/healthz","route":"/healthz","status":200,"duration_ms":0,"bytes":16,"request_id":"abc123","trace_id":"60b0a70a6ebad03fb2e4b4d05246c4ba","span_id":"3c745e4adb43be47"}
 {"time":"2026-08-23T12:00:02Z","level":"INFO","msg":"domain event published","event_name":"AssociateShiftStarted","occurred_at":"2026-08-23T12:00:02Z"}
 ```
 
@@ -46,9 +47,12 @@ formatting step.
 ## What gets logged
 
 - **HTTP requests** — a chi middleware (`internal/adapters/inbound/http/logging.go`)
-  logs method, path, status, `duration_ms`, response `bytes`, and the chi
-  `request_id` for every request. Responses with a `5xx` status are logged
-  at `Error`; everything else at `Info`.
+  logs method, raw `path`, the matched `route` pattern, status,
+  `duration_ms`, response `bytes`, and the chi `request_id` for every
+  request. Responses with a `5xx` status are logged at `Error`; everything
+  else at `Info`. Logging both `path` and `route` gives log aggregation the
+  same low-cardinality grouping key the trace spans use, without losing the
+  concrete URL.
 - **Domain events** — `events.LogPublisher` (used when
   `EVENT_PUBLISHER=log`, the default) logs each published domain event's
   name and occurrence time at `Info`. A `nil` `*slog.Logger` disables event
@@ -56,3 +60,21 @@ formatting step.
 - **Startup/shutdown and config errors** — missing required env vars,
   invalid env var values, and the Kafka publisher's configuration/close
   errors are logged via `slog` before the process exits.
+
+## Trace correlation
+
+`cmd/workforce` wraps the JSON handler in
+`telemetry.TraceHandler` (`internal/adapters/outbound/telemetry/slogotel.go`)
+before calling `slog.SetDefault`. On every record logged with a context that
+carries a valid span context, the wrapper appends `trace_id` and `span_id`;
+records logged without an active span are passed through unchanged, so
+nothing gains empty correlation fields.
+
+This only fires for the `*Context` logger methods (`InfoContext`,
+`ErrorContext`, …) — a plain `logger.Info(...)` has no context to read a span
+from. The HTTP request-logging middleware uses the `*Context` variants, and
+the otelchi middleware runs ahead of it so a span already exists by the time
+the line is written.
+
+See the README's Observability section for what the resulting `trace_id`
+links to.

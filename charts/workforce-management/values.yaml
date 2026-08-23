@@ -80,6 +80,21 @@ kafka:
   enabled: false
   brokers: "kafka:9092"
 
+# OpenTelemetry. Traces and metrics are PUSHED over OTLP/gRPC to a Collector;
+# there is no scrape endpoint on the pod. Export is non-blocking, so pointing
+# this at an unreachable Collector degrades to "telemetry dropped", never to a
+# crash-looping or hanging pod.
+otel:
+  enabled: true
+  endpoint: "otel-collector.observability.svc.cluster.local:4317"
+  serviceName: "workforce-management"
+
+# deployment.environment.name resource attribute on every span and metric.
+environment: "local"
+
+# Log level for the JSON slog handler: debug|info|warn|error.
+logLevel: "info"
+
 extraEnv: []
 
 livenessProbe:

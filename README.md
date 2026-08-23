@@ -62,6 +62,8 @@ internal/
     outbound/memory/            in-memory repos for tests/local
     outbound/events/            log/buffered publisher (kafka-ready interface)
     outbound/clock/             system clock
+    outbound/kafka/             Kafka publisher + trace-context header carrier
+    outbound/telemetry/         OTel setup (traces/metrics) + trace-aware slog handler
 migrations/                   golang-migrate SQL files
 ```
 
@@ -111,6 +113,11 @@ Env vars:
 | `MAX_HOURS_PER_SHIFT` | no | `8` | the configured max-hours-per-shift cap |
 | `EVENT_PUBLISHER` | no | `log` | `log` or `kafka` — see [Integration](#integration) |
 | `KAFKA_BROKERS` | no | `localhost:9092` | comma-separated broker list, used when `EVENT_PUBLISHER=kafka` |
+| `LOG_LEVEL` | no | `info` | `debug`\|`info`\|`warn`\|`error` (case-insensitive) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no | `localhost:4317` | OTel Collector gRPC endpoint — see [Observability](#observability) |
+| `OTEL_SERVICE_NAME` | no | `workforce-management` | `service.name` resource attribute |
+| `SERVICE_VERSION` | no | `dev` | `service.version` resource attribute (overridable at build time with `-ldflags "-X main.version=..."`) |
+| `ENVIRONMENT` | no | `local` | `deployment.environment.name` resource attribute |
 
 ## API
 
@@ -237,6 +244,64 @@ curl -X POST localhost:8080/shift-plans \
 docker exec warehouse-kafka /opt/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 --topic warehouse.workforce.events --from-beginning --max-messages 2
 ```
+
+## Observability
+
+Traces and metrics are exported over **OTLP/gRPC** to an OpenTelemetry
+Collector; logs are structured JSON on stdout, correlated to traces by
+`trace_id`/`span_id`. There is no `/metrics` scrape endpoint on this service
+— the Collector does Prometheus exposition, so the pod only pushes.
+
+A Collector is expected at `OTEL_EXPORTER_OTLP_ENDPOINT` (default
+`localhost:4317`). In the `warehouse-infra` kind cluster the Helm chart points
+this at the in-cluster Collector Service
+(`otel-collector.observability.svc.cluster.local:4317`, see `otel.endpoint` in
+`charts/workforce-management/values.yaml`).
+
+**If no Collector is reachable, nothing breaks.** The OTLP exporters are
+non-blocking — no `grpc.WithBlock()` dial option — so telemetry is silently
+dropped while the service starts and serves exactly as it otherwise would.
+That is enforced by a test
+(`TestSetupDoesNotBlockWithoutACollector`), not just by convention.
+
+### What gets exported
+
+| Signal | What |
+|--------|------|
+| Traces | one server span per HTTP request, named by **route pattern** (`POST /associates/{id}/assignments`), not the raw path, so span-name cardinality stays bounded by the route table |
+| Traces | a client child span per Postgres round-trip via `otelpgx`, carrying the **parameterized** SQL (`$1`, `$2`, … — literal values are never recorded) |
+| Traces | a `kafka.publish warehouse.workforce.events` producer span, with W3C trace context injected into each message's Kafka headers so a consumer's span is a child of ours |
+| Metrics | `http.server.request.duration` (histogram, seconds, OTel HTTP semconv) |
+| Metrics | `workforce.labor_assignments` (counter) — every `AssignLabor` attempt, attributed `workforce.assignment.outcome=accepted\|rejected`, `workforce.path.id`, and on rejection `workforce.assignment.reason` (`uncertified`, `on_break`, `shift_ended`, `max_hours_exceeded`, `associate_not_found`, `internal_error`) |
+| Metrics | Go runtime metrics (goroutines, GC, memory) via `contrib/instrumentation/runtime` |
+| Logs | JSON to stdout via `log/slog`, level from `LOG_LEVEL`; request-scoped lines carry `trace_id`, `span_id`, `route` and `request_id` |
+
+`workforce.labor_assignments` is instrumented **in the use case**, not in the
+HTTP handler, so it counts real domain outcomes rather than requests. Note
+there is no `double_booked` rejection reason: this context resolves a second
+active assignment by ending the prior one and raising `LaborReassigned`, so
+double-booking is prevented by construction rather than rejected — see
+`LaborAssignment.Assign`.
+
+### Seeing it locally
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317   # or leave unset
+go run ./cmd/workforce
+curl -s localhost:8080/healthz
+```
+
+Each request emits a log line like:
+
+```json
+{"time":"...","level":"INFO","msg":"http request","method":"POST",
+ "path":"/associates/A-100/assignments","route":"/associates/{id}/assignments",
+ "status":201,"duration_ms":4,"bytes":60,"request_id":"...",
+ "trace_id":"60b0a70a6ebad03fb2e4b4d05246c4ba","span_id":"3c745e4adb43be47"}
+```
+
+Paste that `trace_id` into Jaeger/Tempo to jump straight from the log line to
+the trace, including its Postgres child spans.
 
 ## Local development / quality gate
 
