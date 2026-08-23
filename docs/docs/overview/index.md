@@ -1,6 +1,6 @@
 ---
 id: index
-slug: /overview/
+slug: /overview
 title: Workforce Management
 sidebar_label: Introduction
 sidebar_position: 1

@@ -1,6 +1,6 @@
 ---
 id: index
-slug: /adr/
+slug: /adr
 title: Architecture Decision Records
 sidebar_label: About ADRs
 sidebar_position: 1

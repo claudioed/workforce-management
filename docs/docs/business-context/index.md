@@ -1,6 +1,6 @@
 ---
 id: index
-slug: /business-context/
+slug: /business-context
 title: Business Context
 sidebar_label: Overview
 sidebar_position: 1

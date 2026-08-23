@@ -103,7 +103,7 @@ const config: Config = {
           label: 'API',
         },
         {
-          to: '/docs/adr/',
+          to: '/docs/adr',
           position: 'left',
           label: 'ADRs',
         },
@@ -120,10 +120,10 @@ const config: Config = {
         {
           title: 'Documentation',
           items: [
-            {label: 'Overview', to: '/docs/overview/'},
+            {label: 'Overview', to: '/docs/overview'},
             {label: 'Business Context', to: '/docs/business-context/domain-vision'},
             {label: 'Domain-Driven Design', to: '/docs/ddd/subdomain-classification'},
-            {label: 'Architecture Decisions', to: '/docs/adr/'},
+            {label: 'Architecture Decisions', to: '/docs/adr'},
           ],
         },
         {

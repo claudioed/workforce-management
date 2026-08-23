@@ -1,6 +1,6 @@
 ---
 id: index
-slug: /api-reference/
+slug: /api-reference
 title: API Reference
 sidebar_label: Overview
 sidebar_position: 1

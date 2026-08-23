@@ -1,6 +1,6 @@
 ---
 id: index
-slug: /ddd/
+slug: /ddd
 title: Domain-Driven Design
 sidebar_label: Overview
 sidebar_position: 1

@@ -25,7 +25,7 @@ function HomepageHeader() {
           centre.
         </p>
         <div className={styles.buttons}>
-          <Link className="button button--primary button--lg" to="/docs/overview/">
+          <Link className="button button--primary button--lg" to="/docs/overview">
             Read the docs
           </Link>
           <Link

@@ -1,6 +1,6 @@
 ---
 id: index
-slug: /ecosystem/
+slug: /ecosystem
 title: Ecosystem
 sidebar_label: Overview
 sidebar_position: 1
