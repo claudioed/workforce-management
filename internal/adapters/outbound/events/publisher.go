@@ -6,7 +6,7 @@ package events
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/claudioed/workforce-management/internal/domain/shared"
@@ -15,7 +15,7 @@ import (
 // LogPublisher publishes events by logging them and buffering them in
 // memory, so tests can assert on what was published.
 type LogPublisher struct {
-	Logger *log.Logger
+	Logger *slog.Logger
 
 	mu     sync.Mutex
 	events []shared.DomainEvent
@@ -23,7 +23,7 @@ type LogPublisher struct {
 
 // NewLogPublisher constructs a LogPublisher writing to logger. A nil logger
 // disables logging while still buffering events.
-func NewLogPublisher(logger *log.Logger) *LogPublisher {
+func NewLogPublisher(logger *slog.Logger) *LogPublisher {
 	return &LogPublisher{Logger: logger}
 }
 
@@ -33,7 +33,7 @@ func (p *LogPublisher) Publish(ctx context.Context, evts ...shared.DomainEvent) 
 	defer p.mu.Unlock()
 	for _, e := range evts {
 		if p.Logger != nil {
-			p.Logger.Printf("event=%s occurredAt=%s payload=%+v", e.EventName(), e.OccurredAt(), e)
+			p.Logger.Info("domain event published", "event_name", e.EventName(), "occurred_at", e.OccurredAt())
 		}
 		p.events = append(p.events, e)
 	}

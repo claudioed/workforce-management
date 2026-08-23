@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -27,9 +28,14 @@ type Handler struct {
 }
 
 // NewRouter builds the chi router for the Workforce Management REST API.
-func NewRouter(h *Handler) http.Handler {
+// A nil logger defaults to slog.Default().
+func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(middleware.RequestID)
+	r.Use(RequestLogger(logger))
 	r.Use(middleware.Recoverer)
 
 	r.Get("/healthz", h.healthz)

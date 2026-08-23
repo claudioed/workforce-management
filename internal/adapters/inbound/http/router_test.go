@@ -3,6 +3,8 @@ package http
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +14,8 @@ import (
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/memory"
 	"github.com/claudioed/workforce-management/internal/application/usecases"
 )
+
+var testLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 type fixedClock struct{ now time.Time }
 
@@ -58,7 +62,7 @@ func doRequest(t *testing.T, r http.Handler, method, path string, body any) *htt
 }
 
 func TestHealthz(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	rec := doRequest(t, router, http.MethodGet, "/healthz", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -66,7 +70,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestStartShift(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{Certifications: []string{"pack"}})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
@@ -81,7 +85,7 @@ func TestStartShift(t *testing.T) {
 // case runs, so an empty certification string is rejected as 400 RFC 7807
 // rather than reaching the domain/use-case layer.
 func TestStartShift_RejectsEmptyCertification(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{Certifications: []string{""}})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
@@ -90,7 +94,7 @@ func TestStartShift_RejectsEmptyCertification(t *testing.T) {
 }
 
 func TestCertify(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{})
 
 	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/certifications", certifyRequest{Certification: "hazmat"})
@@ -100,7 +104,7 @@ func TestCertify(t *testing.T) {
 }
 
 func TestCertify_NotFound(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	rec := doRequest(t, router, http.MethodPost, "/associates/ghost/certifications", certifyRequest{Certification: "hazmat"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
@@ -109,7 +113,7 @@ func TestCertify_NotFound(t *testing.T) {
 }
 
 func TestProposePathPlan(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	rec := doRequest(t, router, http.MethodPost, "/paths/pack/plan/propose", proposePathPlanRequest{BuildingId: "bldg-1", Charge: 100, PlannedRate: 30})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -124,7 +128,7 @@ func TestProposePathPlan(t *testing.T) {
 }
 
 func TestCommitShiftPlan(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	req := commitShiftPlanRequest{
 		BuildingId: "bldg-1",
 		ShiftId:    "shift-1",
@@ -144,7 +148,7 @@ func TestCommitShiftPlan(t *testing.T) {
 // TestCommitShiftPlan_RejectsPlannedHeadsExceedingInstalledStations is a
 // Definition-of-Done named failing-path test at the HTTP layer.
 func TestCommitShiftPlan_RejectsPlannedHeadsExceedingInstalledStations(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	req := commitShiftPlanRequest{
 		BuildingId: "bldg-1",
 		ShiftId:    "shift-1",
@@ -164,7 +168,7 @@ func TestCommitShiftPlan_RejectsPlannedHeadsExceedingInstalledStations(t *testin
 // them as plain strings), so the adapter itself must reject an empty
 // buildingId as 400 before calling the use case.
 func TestCommitShiftPlan_RejectsMissingBuildingId(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	req := commitShiftPlanRequest{
 		ShiftId: "shift-1",
 		Lines: []pathPlanLineRequest{
@@ -179,7 +183,7 @@ func TestCommitShiftPlan_RejectsMissingBuildingId(t *testing.T) {
 }
 
 func TestAssignLabor(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{Certifications: []string{"pack"}})
 
 	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/assignments", assignLaborRequest{PathId: "pack"})
@@ -194,7 +198,7 @@ func TestAssignLabor(t *testing.T) {
 // TestAssignLabor_RejectsMissingCertification is a Definition-of-Done named
 // failing-path test at the HTTP layer.
 func TestAssignLabor_RejectsMissingCertification(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{})
 
 	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/assignments", assignLaborRequest{PathId: "hazmat"})
@@ -207,7 +211,7 @@ func TestAssignLabor_RejectsMissingCertification(t *testing.T) {
 // TestAssignLabor_RejectsWhileOnBreak is a Definition-of-Done named
 // failing-path test at the HTTP layer.
 func TestAssignLabor_RejectsWhileOnBreak(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{Certifications: []string{"pack"}})
 	doRequest(t, router, http.MethodPost, "/associates/assoc-1/break/start", nil)
 
@@ -218,7 +222,7 @@ func TestAssignLabor_RejectsWhileOnBreak(t *testing.T) {
 }
 
 func TestStartAndEndBreak(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{})
 
 	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/break/start", nil)
@@ -233,7 +237,7 @@ func TestStartAndEndBreak(t *testing.T) {
 }
 
 func TestStaffingGap(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	req := commitShiftPlanRequest{
 		BuildingId: "bldg-1",
 		ShiftId:    "shift-1",
@@ -257,7 +261,7 @@ func TestStaffingGap(t *testing.T) {
 }
 
 func TestEndShift(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{})
 
 	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/end-shift", nil)
@@ -270,7 +274,7 @@ func TestEndShift(t *testing.T) {
 // generic (non-domain-sentinel) RFC 7807 category: malformed JSON falls
 // back to the status-keyed "malformed-request-body" category.
 func TestMalformedRequestBody(t *testing.T) {
-	router := NewRouter(newTestHandler())
+	router := NewRouter(newTestHandler(), testLogger)
 	req := httptest.NewRequest(http.MethodPost, "/associates/assoc-1/start-shift", bytes.NewReader([]byte("{not json")))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()

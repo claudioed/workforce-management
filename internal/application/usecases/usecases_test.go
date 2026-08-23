@@ -3,7 +3,8 @@ package usecases
 import (
 	"context"
 	"errors"
-	"log"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ func newFixtures() *fixtures {
 		associates:  memory.NewAssociateRepo(),
 		shiftPlans:  memory.NewShiftPlanRepo(),
 		assignments: memory.NewAssignmentRepo(),
-		pub:         events.NewLogPublisher(log.New(log.Writer(), "", 0)),
+		pub:         events.NewLogPublisher(slog.New(slog.NewTextHandler(io.Discard, nil))),
 		clock:       &fixedClock{now: time.Date(2026, 1, 1, 8, 0, 0, 0, time.UTC)},
 	}
 }

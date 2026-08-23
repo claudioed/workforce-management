@@ -13,7 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	stdlog "log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/cucumber/godog"
-	chimiddleware "github.com/go-chi/chi/v5/middleware"
 
 	inboundhttp "github.com/claudioed/workforce-management/internal/adapters/inbound/http"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
@@ -49,7 +48,7 @@ func newServer() *httptest.Server {
 	associates := memory.NewAssociateRepo()
 	shiftPlans := memory.NewShiftPlanRepo()
 	assignments := memory.NewAssignmentRepo()
-	pub := events.NewLogPublisher(stdlog.New(io.Discard, "", 0))
+	pub := events.NewLogPublisher(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	clock := &fixedClock{now: time.Date(2026, 1, 1, 8, 0, 0, 0, time.UTC)}
 
 	handler := &inboundhttp.Handler{
@@ -64,7 +63,7 @@ func newServer() *httptest.Server {
 		EndAssociateShift:   &usecases.EndAssociateShift{Associates: associates, Assignments: assignments, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
 	}
 
-	return httptest.NewServer(inboundhttp.NewRouter(handler))
+	return httptest.NewServer(inboundhttp.NewRouter(handler, slog.New(slog.NewTextHandler(io.Discard, nil))))
 }
 
 // world is the per-scenario state: the server under test plus the most
@@ -462,11 +461,6 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 
 // TestFeatures runs every Gherkin feature under features/ as a Go test.
 func TestFeatures(t *testing.T) {
-	// chi's request logger writes to stdout from a package-level default,
-	// which would bury godog's pretty output. Silencing it here is
-	// test-only: the service's own logging is untouched.
-	chimiddleware.DefaultLogger = chimiddleware.RequestLogger(&chimiddleware.DefaultLogFormatter{Logger: stdlog.New(io.Discard, "", 0)})
-
 	suite := godog.TestSuite{
 		ScenarioInitializer: InitializeScenario,
 		Options: &godog.Options{

@@ -6,7 +6,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,11 +26,33 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatal(err)
+		slog.Error("service exited with error", "error", err)
+		os.Exit(1)
 	}
 }
 
+// newLogger builds the service's JSON-to-stdout slog.Logger. level accepts
+// debug|info|warn|error (case-insensitive), defaulting to info for an
+// unrecognized value.
+func newLogger(level string) *slog.Logger {
+	var lvl slog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+}
+
 func run() error {
+	logger := newLogger(envOrDefault("LOG_LEVEL", "info"))
+	slog.SetDefault(logger)
+
 	databaseURL := requireEnv("DATABASE_URL")
 	httpAddr := envOrDefault("HTTP_ADDR", ":8080")
 	migrationsPath := envOrDefault("MIGRATIONS_PATH", "migrations")
@@ -52,7 +74,7 @@ func run() error {
 	assignments := postgres.NewAssignmentRepo(pool)
 	sysClock := clock.System{}
 
-	publisher, closePublisher, err := newEventPublisher(shiftPlans)
+	publisher, closePublisher, err := newEventPublisher(shiftPlans, logger)
 	if err != nil {
 		return err
 	}
@@ -72,13 +94,13 @@ func run() error {
 
 	server := &http.Server{
 		Addr:              httpAddr,
-		Handler:           inbound.NewRouter(handler),
+		Handler:           inbound.NewRouter(handler, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("workforce-management listening on %s", httpAddr)
+		logger.Info("http server listening", "addr", httpAddr)
 		serverErr <- server.ListenAndServe()
 	}()
 
@@ -102,19 +124,19 @@ func run() error {
 // (kafka|log, default log) so existing behavior — and existing tests — are
 // unaffected unless kafka is explicitly opted into. It returns a close func
 // to release any adapter resources on shutdown.
-func newEventPublisher(shiftPlans ports.ShiftPlanRepo) (ports.EventPublisher, func(), error) {
+func newEventPublisher(shiftPlans ports.ShiftPlanRepo, logger *slog.Logger) (ports.EventPublisher, func(), error) {
 	switch envOrDefault("EVENT_PUBLISHER", "log") {
 	case "kafka":
 		brokers := strings.Split(envOrDefault("KAFKA_BROKERS", "localhost:9092"), ",")
 		pub := kafka.NewPublisher(brokers, shiftPlans)
-		log.Printf("event publisher: kafka brokers=%v topic=%s", brokers, kafka.Topic)
+		logger.Info("event publisher configured", "publisher", "kafka", "brokers", brokers, "topic", kafka.Topic)
 		return pub, func() {
 			if err := pub.Close(); err != nil {
-				log.Printf("kafka publisher close: %v", err)
+				logger.Error("kafka publisher close failed", "error", err)
 			}
 		}, nil
 	case "log":
-		return events.NewLogPublisher(log.Default()), func() {}, nil
+		return events.NewLogPublisher(logger), func() {}, nil
 	default:
 		return nil, nil, fmt.Errorf("unknown EVENT_PUBLISHER %q (want kafka or log)", os.Getenv("EVENT_PUBLISHER"))
 	}
@@ -123,7 +145,8 @@ func newEventPublisher(shiftPlans ports.ShiftPlanRepo) (ports.EventPublisher, fu
 func requireEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {
-		log.Fatalf("missing required env var %s", key)
+		slog.Error("missing required env var", "key", key)
+		os.Exit(1)
 	}
 	return v
 }
@@ -142,7 +165,8 @@ func envFloatOrDefault(key string, def float64) float64 {
 	}
 	f, err := strconv.ParseFloat(v, 64)
 	if err != nil {
-		log.Fatalf("invalid float for env var %s: %v", key, err)
+		slog.Error("invalid float env var", "key", key, "error", err)
+		os.Exit(1)
 	}
 	return f
 }
