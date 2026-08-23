@@ -1,0 +1,69 @@
+---
+id: propose-path-plan
+title: "Propose planned heads for a path (pure computation, not committed)"
+description: "Computes `heads = ceil(charge / plannedRate)` for one path and raises ShiftPlanProposed for visibility — it persists nothing and commits nothing. A human must still call POST /shift-plans to commit an actual ShiftPlan. This is why the response is 200, not 201: no resource is created."
+sidebar_label: "Propose planned heads for a path (pure computation, not committed)"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "post api-method"
+info_path: docs/api-reference/rest/workforce-management-api
+custom_edit_url: null
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Propose planned heads for a path (pure computation, not committed)"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"post"}
+  path={"/paths/{pathId}/plan/propose"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Computes `heads = ceil(charge / plannedRate)` for one path and raises ShiftPlanProposed for visibility — it persists nothing and commits nothing. A human must still call POST /shift-plans to commit an actual ShiftPlan. This is why the response is 200, not 201: no resource is created.
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./propose-path-plan.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./propose-path-plan.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./propose-path-plan.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

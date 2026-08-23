@@ -1,0 +1,69 @@
+---
+id: start-associate-shift
+title: "Start an associate's shift"
+description: "Creates a new AssociateShift roster entry for this shift, with an initial set of certifications, raising AssociateShiftStarted. The associate id is client-supplied and this endpoint is naturally idempotent by that id: calling it twice for the same associate upserts the roster entry rather than erroring (each call still re-raises AssociateShiftStarted and returns 201)."
+sidebar_label: "Start an associate's shift"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "post api-method"
+info_path: docs/api-reference/rest/workforce-management-api
+custom_edit_url: null
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Start an associate's shift"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"post"}
+  path={"/associates/{id}/start-shift"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Creates a new AssociateShift roster entry for this shift, with an initial set of certifications, raising AssociateShiftStarted. The associate id is client-supplied and this endpoint is naturally idempotent by that id: calling it twice for the same associate upserts the roster entry rather than erroring (each call still re-raises AssociateShiftStarted and returns 201).
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./start-associate-shift.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./start-associate-shift.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./start-associate-shift.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

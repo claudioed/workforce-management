@@ -1,0 +1,1 @@
+{"title":"Body","body":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["pathId"],"properties":{"pathId":{"type":"string","minLength":1,"description":"The path to assign the associate to.","example":"pack"}},"title":"AssignLaborRequest"},"example":{"pathId":"pack"}}}}}

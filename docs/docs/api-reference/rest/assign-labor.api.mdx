@@ -1,0 +1,69 @@
+---
+id: assign-labor
+title: "Assign an associate to a path"
+description: "Puts an associate on pathId for a new interval, raising LaborAssigned (first assignment) or LaborReassigned (an assignment was already active). The 'exactly one ACTIVE assignment per associate' invariant is enforced by construction, not by rejecting a second call: if the associate already has an active assignment, it is closed first (its hours are logged against the associate's shift) and the new one starts — this matches how rebalancing actually happens on the floor, a supervisor moves someone without first 'unassigning' them. The assignment requires the associate hold the path's required certification (by convention, the Certification with the same name as the PathId — e.g. path 'pack' requires certification 'pack'), and is rejected if the associate is currently on a logged break or their shift has ended."
+sidebar_label: "Assign an associate to a path"
+hide_title: true
+hide_table_of_contents: true
+api: eJztWu9uG7kRf5UBv0RyV7JzzeHudF/q5nJXt7me4Tg9FFEAj7ijXZ655B7JlawaBvoQfcI+STHkrnYl2XHQ9ssBCpDEJrnk/P3NDDn3wtbkMChrLnIxE+i9KsxbXFgnMpGTl07VPCtm4rIJHtAAem+lwkBgDdQYyoscltYBgqE1KBPIrVBn4FB5ZQqIu53HjSmH0VI5HyAdVJEJY7Aurbki3K5K57RLYI0eUDvCfAMog1rReArXJcFc0B3KoDdgDcH56+uLv70ZfliT6+mdC1BmhU6hCaA8kFlaJymHxQakNT64RjKvGRgbeNDRLyQD84DgSVqTg0StZ6CWEEoaSKIjrsQkokjjgJAMVDxSausphySDkQoeSts4D+gItC0KygELVMaH3QNeePClWoYxoMnjFMuaefYBXfDw73/+C0KpPFQYZEm87xocLVCjkZEDGRrUmkmsazKelcf7LLW1LmMGm5rcSnnroLIr8uBtRXzCWoXSNqElei4ak/hSppgL3qNKuhiI3dGvjXLk96RUWp2IZ6t54btlOUhyQS2VjIYIo6SPFZmkDf7i9c4KJikOe6wIDP+D6bDLZI8sDpoW03gSzEWN8nYuerp2D+zmx1kUr/Kt5ik/1DQrsXGOTDI6wE5vC0d4y7YcSlIuqSvaA5mc8qnIRMDCi9kHcb4VlBcfM1Gjw4oCOZ68F8yNmAmVi0wo9jtmQWSiE5aYBdfQvnNe71mLyll6YQOj8270Ih8zFV6WVKGY3YuwqfkkH5wyhchEpcxbMkUoxezlQ8aeVdWaEipYOXkpHj4mMsiHP9p8w3vsUyWtCWQCT2Fd61bCp794pvL+8HC7YEHvsPdBJFCJsnGMT0GR52/a8WdIf0w00QyCbW10T6XBslx6dtkYxMNDJoIKceC8R8WrxL4YyqcnrPuUP3bka2t8ovyLs5f83y5h5z18tLg3hbe2tcnaKsN4G5JbD3W742jeNk4SjDBAZX2ImHAAP0B3yge/C4cZeBslIa3WFJEP3l9dtKazVORBhWgyJWEezfNedPQdcsOf2uUBbD1C7KetsNfD6XYff9qa4CkOfCeK+f9icNj7iMhEEt+h+Q1XfZLwrb90e10+abhPmGoryBZpHo0nS0Czecxwtwz0xy2s1YTm4LyfSwoluT1/6PHtqXC2cyw7/qG38LKr1gX2vGVHjlth7csqcdMzk47hg16dnR2a34+ol9ZVlMOf3/30V1jYfJNBzEq2UWapSOcxl6iU59TklKqaITL+N9mSNVF5BmmMlTH4dSdsZN02k0WjdM4/8MpuMAaAOMIRtaNu0uLnhAmMzvWEAdfOLjRVv3vekHflcPX9a/jq67OvYFSGUPvZ6el6vZ66pZxQroJ1U+uKU7eU/JfXjeEynQTfUUClfczl/nR9fQnnlxd+Cu9jwmId0IrcBsg566ADN1Am4ZPn3EFSlkLz68TT5HpT0wyeYmu654WRsc6OMuEDhsZHBpmwQ39Mgjj0KZY0BjETjVMH8jkfYtyGMyM2/sTV6/PrNz/8dPV3GHECmPiqSbLGwcrkFpJTz+8s+ZgkGqKc4wpDm15RDDHgCDXUWNCud3b6iGf56dq625h/Tio0WFD0qzU6Km3jaeI3PlDlpzmtehxsjSpmFKJ3uedg5Xt1R3kGEgMV1m0mmlakoWwqNBPOW3GhCXxTVej2EKUPUX0+0+W6WypaRfVkcA1QkBuqQpnw+y8exbtoamkLkDanDPIm2QvlUJKjGLU6s94h79XZNw9b8/gscN2qMym8Iu+xoGjeUd29lqeHiP6cHDhtRyM/QyFMSgsEbWpSYoDa2bzheiSSEimcPhsQdyDJ76QtrWPvoW9L2X9vjY9AoegP3U3Uq8aHVE1RgtDer2evzs565Qn57He9eB8VRCyEkoOILk68OowTSfRLikrOh8UJskuneoryVs+jLmeZGBsmS9uY/AjaR9A+gvYRtH9boH2IYwPMvuqqSPaObrKH6VcDmB6ueAKQi9L6cMhiQuRvDhH5tTVLrWRo77CGlYhGeZvudZ64KtraQFTIaGdy0n0zzp67tRn1zmrNJI6Ns8cvcoZrB449jmk+X+916FQ7xeXHQSm+to3OoW582dGQrgDtqi3EpDVLVTTMbIV30ZHaYFTh3SQuntCdJOJjj8HoGIyOwegYjH5TwehxmBY7V0gHEWAX+PtLnWEE2Alb3wzC1mMh5TM3fKbs2LuQfMjEl49dT703UvPSpeIjUOnGEYziEwWyeXrlAxsNJJg0YVI3C618mbQ4jsExvq0Z1JOtZo/Qf4T+I/Qfof83A/27EDaA/It2IoIBOejmO/v4cve2yBrTPlk5Wjae9uuRZOu1xrb2eMhERaG08WHBeoa+iO+7crlX+cMOomcikZOeZhunW+Znp6faStRc6sy+Pvv67EBL/FCmIWdnsTVvFl9PPcnGqbARsw8fM8E4dtW/p7558kGReVvaqIBWXD93IocftyJnzBWZYHITDS+nZ9OzNkqgjFGifV2WGptc2Sg2qlqZdmNTq9WKlMM/FDw1lTaawd7T0WME8EMlvGvq2rrYNrHgSpGLNob0u5As1a6Nh7lYl5bXWzM3UVkZ12XrUsmSbVmSTxE44yfQNX/nMNC3kCtHMsDKgzLtz7Ekms7F3MzNRQDJlZSHsObXTWUKP+OJl1M4OYleHC0jXvMB2wf3MUBpnfqHNScnMc5igjemo7aefNd0YeYGAKStKu7cQPC1VoHf6viBVNomvtQ5y5QPOPAwunnHh15qNDcZVJhT3Mgu4YZfu+I4aGXIz1qeI2ERwjD3/a8uPtu2v8U9Iu9cfBqK4xHvuveovnaczs0XLIALExymQDCsSYNDeatM0fJf2VVsGdk6BiworIlSu4+PB6OHBcpbbQvPVh7hbelslagY3Qy6fviIm7Zhh1tLQAVPegmq3UmvceO3QucOm28TinVmU+Ft20viAy6XTFuBNWgq1EInWY5ufqDwrp39AesbOE3CfW/46ZonKL8Zxz4cw8kI5CRVTp4Trpocx5qWnG3bTGxwYk3btZmyDV2XjgiwKBwVSSwobyNd55cXM7jZBryo7hsYOesDY5kJbsOSnZtdxM3a+wcGOcp27gPGGQysBkbJ6gKrvbe2ZICdzbFu2haWA/HDKDYG9G//1tDctA5mtl1bqXHm81uq2DlxboKqKB2827f1yU6aPhNP7UBz8/glzzjK/uTk5xjPh4bxwieEQbcBH2ztZycnvYK1Mrd7DWvBzg32cTygv21bfrZWoXzddlBxVGvvpDCy8n2jl0pr5mxu3tyRbJi8Fx5+sYts27eFDBC1pkB6A7laxqeGABLzmN+PovP506hk1qUjWPlp218W5eHanAL9LUiNqlKmGE/hL0R1l3J6woplPxcsj7nZ6U+ypi9g5gI0BR83m3TMQW21khuQJZpi2+A1N8E2khETtgF9i5BJTJylA6MrRp2ca72X0ntoPEFfRtw8lb7fjL8FT6xOYvxH1vpNm3PcQKpXpnPDcYfDdYVmEL2SXe+rlgupVLLtRKr7vkg6tjAeWxiPLYz/Uwtjyv8ZfE9rjSo6aEyL79t8etBMxenzLPYx4m7HI2fNvPL+foGe3jv98MDDvzbk2sw4mviCM90P9yJXnn/OxWyJ2u+3Pg79e3TVXfnD5zdEPspTO4iGX55XqBv+TWTiljapOfPh40PXGBeJTBPDu4vBhwedaQ9Z98W5lFSHT679OKhdLn96dy0ysWjbLyub8zcO13wdgutEpK1TPcf9mTx2LzSaosGC16Y9+c9/APp3T/Y=
+sidebar_class_name: "post api-method"
+info_path: docs/api-reference/rest/workforce-management-api
+custom_edit_url: null
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Assign an associate to a path"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"post"}
+  path={"/associates/{id}/assignments"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Puts an associate on pathId for a new interval, raising LaborAssigned (first assignment) or LaborReassigned (an assignment was already active). The "exactly one ACTIVE assignment per associate" invariant is enforced by construction, not by rejecting a second call: if the associate already has an active assignment, it is closed first (its hours are logged against the associate's shift) and the new one starts — this matches how rebalancing actually happens on the floor, a supervisor moves someone without first "unassigning" them. The assignment requires the associate hold the path's required certification (by convention, the Certification with the same name as the PathId — e.g. path "pack" requires certification "pack"), and is rejected if the associate is currently on a logged break or their shift has ended.
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./assign-labor.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./assign-labor.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./assign-labor.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

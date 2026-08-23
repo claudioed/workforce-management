@@ -1,0 +1,1 @@
+{"title":"Body","body":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["certification"],"properties":{"certification":{"type":"string","minLength":1,"description":"The certification name to add (e.g. \"hazmat\").","example":"hazmat"}},"title":"CertifyRequest"},"example":{"certification":"hazmat"}}}}}

@@ -1,0 +1,69 @@
+---
+id: start-associate-break
+title: "Start a logged break for an associate"
+description: "Begins a logged break for the associate, raising AssociateBreakStarted. While on break, the associate cannot receive a new labor assignment (see POST /associates/{id}/assignments). Not idempotent: calling this while already on break is rejected as a conflict rather than treated as a no-op, since it represents a discrete state transition, not an upsert."
+sidebar_label: "Start a logged break for an associate"
+hide_title: true
+hide_table_of_contents: true
+api: eJztWlFv2zgS/isDvtTOyXLa62Jb9+Wy2XYve902aNIrDnUBj6mRxIYitSRl1xcYuB9xv/B+yWEo2ZbjZFvcwwEF/BDEEily5puP3wxF3Qpbk8OgrLnIxET4gC6ceW+lwkA/OcIbkYiMvHSq5l5iIn6iQhkPCNoWBWUw516QWwehJMDNwwk4VF6ZAvbHu+IpKEvhQ6k0gTXtAMn+0yDRGBvAkSS1IEAwtASNc+u4kypMRSbAwBPB5duraxhvH/XjW5Wtx7tefpjCGxtAZVTVNpAJE5CoNdsWSuVhGS1B7Qiz1dYiUB4cfSYZKANkh6U1uVYygMNQEvuLBoIj3PYwdmTrBLwykkCx+bUjzzYAQqa8dBQIfGAPg0PjFYOaALuKBprakwupSETAwovJR7HFzotPiajRYUWBHLfdCoMViYlQmUiE4tDUGEqRCEe/N8pRJibBNXQ3ftd9nB95hsUEFVYw2E52kQ3ZCC9LqlBMbkVY1RTp4ZQpRCIqZV6TKUIpJo/XiaAvWNWae8SBR4/F+hOb4WtrPHke4cnpU/53h0oRZ79hxBsLm2dgbrNVKtaJeHp6evjgb6hz6yrK4Nert29i5wSYGrDxHXJFOoMleqiUZx6OqarZy/hvtEVgpLIE2nsMX+9SkgsqVxLbGHXDjOaN0hn/4J6bm75UeYh3rINqY92IrSEfRmxghFRawwRkj7CudTf4uHZ2rqn602fP7t0eIm/nTMSDtfju1Tn8+Oz0RxiUIdR+Mh4vl8vU5XJEmQrWpdYVY5dL/uN+Q7hsZ4KfKaDSPq7bv15fX8LZ5YVP4b1n6KwDWpBbATln3S4oyrQLxpNbKEkJLFUo4bz1aXS9qmkCD7mV7hHzY+tYIoIKmv/zmmh8dJANi2x3LE5BtQRqgTikIiONQUxE49QBPmfw/t1Fx/B81S546rw6P7t++cvbd/+AAa++1q+aJEccrJSNc2QkDVP42ZKPK9QQZRAiSa1eEP9kwqGGGgtiB3cLYROPOJdPl9bd5NZJGlVosCDWpXSJjkrbeBr5lQ9U+TSjxU7IOlKRySjjldBCdQ8E+z6/Ul8oS0BioMK61UjTgjSUTYVmxAqHc03gm6pCt9q3ebv+Ic4MJWtap4pbK7pA7cxQJlBBrh8KZcKfnxwYxsITqdYOAdJmlEDWtHyhDEpyBDU52NB6z7ynp8/XW3p8FQWebBvONuAVeY8FdalK+V6U93HAb8FBGR/QyG8ICJvSCQGwxHDeCFA7mzWSCcWmRAv3rehntE5Wx3uS5MV6xwrRLWzRl+OtZf87G++RQrGb9Lx/H6rGh7hQ5tRK6G5dT56enu6CJ+RXn9vBey8QMWe0C0Ss1+uYJ+5JMC30OcUgZ73ygkNq7Cb1dHEe8MJuGBZjwyi3jcmOon0U7aNoH0X7+xLtQx3rafa7rjGujk3jTqaf9mS63+MBQS5K68Ohi60iPz9U5PPNHuo///r3nS2f8od7sMFuYXVtI2tGsW0Ya+1QknIPhbz/eG9dHkX9KOpHUT+K+vcl6g8rYU/cz/5ITfd0/nlP5/9Qg79ejMdubUneSf8P9720eW+k5rdyuWJlQ6UbRzCgtEgBmWxe+cAUgFb0TBjVzVwrX7YxGcaUwRx3BvVoG6ejkB+F/CjkRyH/boR8X8J64n3RNUQxIAeb9g0/fth/h2KNIRlfoDjKG093q/SW67XGriJfJ6KiUFo+6KmtZ+mLBwb7uMTDk76iJ6I1pz1zaJzunJ+Mx9pK1LwBmDw7fXZ6EKXX3AwZLxZbMyDxWMCTbJwKKzH5+IkNzm1EtcPgwwZH+G2LIwupSATb0A78OD1NTzvpRxmlvzsLkRqbTNmIBVUdUJt7qdVqQcrhXwpuSqWNsd03+l4DOC3CVVPX1gWWvDlviiiDmHu+hJZ+dmk8TMWytNzfmqmJEUg4ky5LJUsmqCTvI2UTwABLfs5hoBeQKUcywMKDMt3v0jbOp1MxNVNzEUBaRgDC0jLBTeEn3PA4hZOTuDRjuGPMgINu2NDSOvVPa05OYvLEVrPYjtp68oCGFwuZqQEAaatKxZMqX2sVwOZQEmbSNiYASmfZ8p4HHgazK570UqOZJVBhRnEgm8PsEkMZ74NWhvyk8zkaFnUJM7+7dPHAsLuKY0TfeYtnKN6PIrY5eokX0d90ap4wABcmOGzVvX8+GBzKG2WKzv/KLvjpHdthTmFJZFp/4sToYY7yRtvCM3WjZuXOVq0Vg9lrPoM8204xG6bA6Fd2wSd+nnQOqhtJL3Hlt6DzkeOLVpo2tKnwhnzMnz5gnrNtBdagqVBz3WI5mP1C4apr/QXrGYxbcN+bjFx8jLLZMOHTRsMVBmQkVUaeq6iaHCeQzhxwNEeNscIybCszNmUOXZeOCLAoHBUtLChvol1nlxcTmG2zWAz3DAbO+sACZYJbMbJTsy+jSbd9jyedyeakeBPTHmtg0LIucNh3bGsJuOEcx2aYRLIewA8DZkjv1NkamppugZm2XFygjuGnLyiDXkVOnZ1fX/z9ZZ8rzKldmsIAODVBVdROjKbft380rPI77zE0yps2qmzGIz8120PJPZSGEfuTkw8xSfeJ8ci3CoNuBT7Y2k9OTnYB1src+M6gbspgpwZ3yTmgv2nN3rFC+RqDLMkDp6ru9QtGV141Oldas2dT8/ILyYbNe+Ths50ngAVyVonn35wDA+kVZCqPb9UDSMxi0T6Ii8+PY5A5lo5g4VPwJK3JIh6uKxTQ34DUqCplimEKfyOqN3WkJ6wY+6lgPKZmb2diu1qZYZ0K0BR8HGy0cQ5qq5VcgSzRFBRLaduEqQm2kayYsM3SW4VsYeLSG1hdMcbkTOs7dbqHxhPs9gazh2ry2fAF8EcJoSTWf+Soz7pCYgbtJiSdGs47nIMrNL3sFb+NuO/Lin6w76bZ290O6Phtxv/l24y2AOSFOq41qhjMWBfddgXVx129y/uvSfxCo7cFd4E3Y1w4cd/b2zl6eu/0es23f2/IdcXRAp3ivUWsvDLl+XcmJjlqf/ezjj4LBu86vRnCt3/sca9X3U00fCS3QN3wlUjEDa3aD0/Wn9aJYN0mF41sG86kpDr0HnlwY84F4bYoZbKI9fq/lcTuUA==
+sidebar_class_name: "post api-method"
+info_path: docs/api-reference/rest/workforce-management-api
+custom_edit_url: null
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Start a logged break for an associate"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"post"}
+  path={"/associates/{id}/break/start"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Begins a logged break for the associate, raising AssociateBreakStarted. While on break, the associate cannot receive a new labor assignment (see POST /associates/\{id\}/assignments). Not idempotent: calling this while already on break is rejected as a conflict rather than treated as a no-op, since it represents a discrete state transition, not an upsert.
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./start-associate-break.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./start-associate-break.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./start-associate-break.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

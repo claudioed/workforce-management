@@ -1,0 +1,69 @@
+---
+id: end-associate-break
+title: "End a logged break for an associate"
+description: "Ends the associate's current logged break, raising AssociateBreakEnded. Not idempotent: calling this while not on break is rejected as a conflict rather than treated as a no-op."
+sidebar_label: "End a logged break for an associate"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "post api-method"
+info_path: docs/api-reference/rest/workforce-management-api
+custom_edit_url: null
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"End a logged break for an associate"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"post"}
+  path={"/associates/{id}/break/end"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Ends the associate's current logged break, raising AssociateBreakEnded. Not idempotent: calling this while not on break is rejected as a conflict rather than treated as a no-op.
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./end-associate-break.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./end-associate-break.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./end-associate-break.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

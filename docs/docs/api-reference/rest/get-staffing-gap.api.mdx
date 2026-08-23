@@ -1,0 +1,69 @@
+---
+id: get-staffing-gap
+title: "Get the staffing gap for a path within a committed shift plan"
+description: "Read-model projection: plannedHeads (from the committed ShiftPlan for buildingId+shiftId) vs. currently active LaborAssignment count for pathId. Raises PathUnderstaffed when active assignments fall short of plannedHeads. This surfaces the gap only — it never decides or performs a rebalance; that stays a human call recorded via POST /associates/{id}/assignments. ShiftPlan is keyed by building+shift, so both are required as query parameters alongside the path in the URL — a path's planned heads only make sense within one committed plan."
+sidebar_label: "Get the staffing gap for a path within a committed shift plan"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "get api-method"
+info_path: docs/api-reference/rest/workforce-management-api
+custom_edit_url: null
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Get the staffing gap for a path within a committed shift plan"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"get"}
+  path={"/paths/{pathId}/staffing-gap"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Read-model projection: plannedHeads (from the committed ShiftPlan for buildingId+shiftId) vs. currently active LaborAssignment count for pathId. Raises PathUnderstaffed when active assignments fall short of plannedHeads. This surfaces the gap only — it never decides or performs a rebalance; that stays a human call recorded via POST /associates/\{id\}/assignments. ShiftPlan is keyed by building+shift, so both are required as query parameters alongside the path in the URL — a path's planned heads only make sense within one committed plan.
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./get-staffing-gap.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./get-staffing-gap.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./get-staffing-gap.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

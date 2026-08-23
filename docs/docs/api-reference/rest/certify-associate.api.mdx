@@ -1,0 +1,69 @@
+---
+id: certify-associate
+title: "Add a certification to an associate"
+description: "Adds a named qualification (e.g. 'pack', 'hazmat', 'pick') to an already-started AssociateShift, raising AssociateCertified. An associate untrained on a path cannot be assigned to it (see POST /associates/{id}/assignments). Adding a certification the associate already holds is a no-op on state (set semantics) but still re-raises the event and returns 204 — certifications are not independently addressable sub-resources, so this returns 204 rather than 201."
+sidebar_label: "Add a certification to an associate"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "post api-method"
+info_path: docs/api-reference/rest/workforce-management-api
+custom_edit_url: null
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Add a certification to an associate"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"post"}
+  path={"/associates/{id}/certifications"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Adds a named qualification (e.g. "pack", "hazmat", "pick") to an already-started AssociateShift, raising AssociateCertified. An associate untrained on a path cannot be assigned to it (see POST /associates/\{id\}/assignments). Adding a certification the associate already holds is a no-op on state (set semantics) but still re-raises the event and returns 204 — certifications are not independently addressable sub-resources, so this returns 204 rather than 201.
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./certify-associate.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./certify-associate.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./certify-associate.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

@@ -1,0 +1,82 @@
+---
+id: workforce-management-api
+title: "Workforce Management API"
+description: "Workforce Management is a Supporting bounded context that owns 'who is on"
+sidebar_label: Introduction
+sidebar_position: 0
+hide_title: true
+custom_edit_url: null
+---
+
+import ApiLogo from "@theme/ApiLogo";
+import Heading from "@theme/Heading";
+import SchemaTabs from "@theme/SchemaTabs";
+import TabItem from "@theme/TabItem";
+import Export from "@theme/ApiExplorer/Export";
+
+<span
+  className={"theme-doc-version-badge badge badge--secondary"}
+  children={"Version: 1.0.0"}
+>
+</span>
+
+<Export
+  url={"https://raw.githubusercontent.com/claudioed/workforce-management/main/apis/openapi.yaml"}
+>
+  
+</Export>
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Workforce Management API"}
+>
+</Heading>
+
+
+
+Workforce Management is a Supporting bounded context that owns "who is on
+shift, on which process path, at what rate; direct vs indirect hours."
+
+It covers two things:
+
+1. **The shift-start planning horizon** — a human proposes and then
+   commits a split of headcount across process paths (`ShiftPlan`, made
+   of `PathPlan` lines: path, planned heads, planned rate, planned
+   hours), one plan per building per shift.
+2. **Intra-shift assignment tracking** — moving associates between paths
+   as backlogs deviate from plan (`LaborAssignment`). The move itself is
+   always a human call; this context makes the staffing gap legible
+   (`GetStaffingGap` / `PathUnderstaffed`), it never decides or performs
+   a rebalance on its own.
+
+Three aggregates back the API: `AssociateShift` (roster entry —
+certifications, break state, logged hours), `ShiftPlan` (committed
+headcount split across paths), and `LaborAssignment` (one associate, one
+path, an interval — exactly one ACTIVE assignment per associate at a
+time, and an assignment is rejected if the associate lacks the path's
+required certification).
+
+**Where this context's boundary stops:** it never links an associate to
+a specific task, and it never dispatches work — that is Fulfillment
+Execution's job, against a completely different cadence (shifts/hours
+here vs. seconds there for task claiming). Keeping the seam at "this
+associate is on this path" lets task-dispatch policy change without
+touching workforce planning, and vice versa.
+
+All error responses use RFC 7807 (`application/problem+json`); see the
+shared `Problem` schema.
+
+
+<div
+  style={{"display":"flex","flexDirection":"column","marginBottom":"var(--ifm-paragraph-margin-bottom)"}}
+>
+  <h3
+    style={{"marginBottom":"0.25rem"}}
+  >
+    Contact
+  </h3><span>
+    claudioed: [claudioed.oliveira@gmail.com](mailto:claudioed.oliveira@gmail.com)
+  </span>
+</div>
+      

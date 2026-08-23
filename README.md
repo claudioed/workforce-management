@@ -7,6 +7,16 @@ intra-shift assignment tracking (moving people between paths as backlogs
 deviate — the move itself stays a human call; this context makes the gap
 legible, it does not decide).
 
+## Documentation
+
+Full documentation is published at
+**<https://claudioed.github.io/workforce-management/>** — the business context
+and the path-boundary reasoning, the DDD model (aggregates, invariants, all ten
+domain events), an interactive REST API reference generated from
+`apis/openapi.yaml`, the CloudEvents catalog from `apis/asyncapi.yaml`, the
+ecosystem context map, and the Architecture Decision Records. Source lives in
+[`docs/`](docs/) and deploys on every push to `main`.
+
 ## Why this context stops at the path boundary
 
 Workforce Management never links an associate to a specific task — it only

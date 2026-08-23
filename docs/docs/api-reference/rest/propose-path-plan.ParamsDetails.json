@@ -1,0 +1,1 @@
+{"parameters":[{"name":"pathId","in":"path","required":true,"description":"The process path's identity (e.g. \"pack\", \"pick\", \"stow\"). By convention, the Certification required to be assigned to a path has the same name as the PathId.","schema":{"type":"string","minLength":1},"example":"pack"}]}

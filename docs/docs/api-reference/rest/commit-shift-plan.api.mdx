@@ -1,0 +1,67 @@
+---
+id: commit-shift-plan
+title: "Commit a shift's headcount split across paths"
+description: "Commits a human-decided ShiftPlan: one or more PathPlan lines (path, plannedHeads, plannedRate, plannedHours), raising ShiftPlanCommitted. Validates, per line, that plannedHeads does not exceed the caller-supplied installedStations for that path (this context enforces the invariant independently — it has no dependency on Work Planning, which owns installed-station counts — the request carries the number it needs), and that plannedHours does not exceed plannedHeads * the configured max hours per shift. Naturally idempotent by the client-supplied (buildingId, shiftId) key: the underlying repository upserts on that key."
+sidebar_label: "Commit a shift's headcount split across paths"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "post api-method"
+info_path: docs/api-reference/rest/workforce-management-api
+custom_edit_url: null
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Commit a shift's headcount split across paths"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"post"}
+  path={"/shift-plans"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Commits a human-decided ShiftPlan: one or more PathPlan lines (path, plannedHeads, plannedRate, plannedHours), raising ShiftPlanCommitted. Validates, per line, that plannedHeads does not exceed the caller-supplied installedStations for that path (this context enforces the invariant independently — it has no dependency on Work Planning, which owns installed-station counts — the request carries the number it needs), and that plannedHours does not exceed plannedHeads * the configured max hours per shift. Naturally idempotent by the client-supplied (buildingId, shiftId) key: the underlying repository upserts on that key.
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./commit-shift-plan.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./commit-shift-plan.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

@@ -1,0 +1,69 @@
+---
+id: end-associate-shift
+title: "End an associate's shift"
+description: "Closes the associate's shift, raising AssociateShiftEnded. Any currently active LaborAssignment is closed first (its hours logged against the shift). Idempotent: ending an already-ended shift is a no-op — no error, no event, still 204."
+sidebar_label: "End an associate's shift"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "post api-method"
+info_path: docs/api-reference/rest/workforce-management-api
+custom_edit_url: null
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"End an associate's shift"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"post"}
+  path={"/associates/{id}/end-shift"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Closes the associate's shift, raising AssociateShiftEnded. Any currently active LaborAssignment is closed first (its hours logged against the shift). Idempotent: ending an already-ended shift is a no-op — no error, no event, still 204.
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./end-associate-shift.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./end-associate-shift.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./end-associate-shift.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

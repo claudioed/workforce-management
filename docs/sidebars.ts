@@ -1,0 +1,90 @@
+import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
+import restApiSidebar from './docs/api-reference/rest/sidebar';
+
+/**
+ * The six top-level categories are fixed across every warehouse-systems
+ * documentation site, in this order, so the five sites read as one family.
+ */
+const sidebars: SidebarsConfig = {
+  docsSidebar: [
+    {
+      type: 'category',
+      label: 'Overview',
+      collapsed: false,
+      link: {type: 'doc', id: 'overview/index'},
+      items: [
+        'overview/quickstart',
+        'overview/architecture',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Business Context',
+      collapsed: false,
+      link: {type: 'doc', id: 'business-context/index'},
+      items: [
+        'business-context/domain-vision',
+        'business-context/path-boundary',
+        'business-context/planning-horizons',
+        'business-context/ubiquitous-language',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Domain-Driven Design',
+      collapsed: false,
+      link: {type: 'doc', id: 'ddd/index'},
+      items: [
+        'ddd/subdomain-classification',
+        'ddd/aggregates',
+        'ddd/invariants',
+        'ddd/domain-events',
+        'ddd/context-relationships',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'API Reference',
+      collapsed: false,
+      link: {type: 'doc', id: 'api-reference/index'},
+      items: [
+        {
+          type: 'category',
+          label: 'REST API',
+          link: {type: 'doc', id: 'api-reference/rest/workforce-management-api'},
+          items: restApiSidebar.slice(1),
+        },
+        'api-reference/events',
+        'api-reference/errors',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Ecosystem',
+      collapsed: false,
+      link: {type: 'doc', id: 'ecosystem/index'},
+      items: [
+        'ecosystem/context-map',
+        'ecosystem/siblings',
+        'ecosystem/integration',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Architecture Decision Records',
+      collapsed: false,
+      link: {type: 'doc', id: 'adr/index'},
+      items: [
+        'adr/0001-hexagonal-ports-and-adapters',
+        'adr/0002-stop-at-the-path-boundary',
+        'adr/0003-certification-gated-single-active-assignment',
+        'adr/0004-kafka-integration-events-and-cloudevents-catalog',
+        'adr/0005-rfc-7807-problem-details',
+        'adr/0006-godog-bdd-acceptance-tests',
+        'adr/0007-arch-go-architecture-fitness-tests',
+      ],
+    },
+  ],
+};
+
+export default sidebars;

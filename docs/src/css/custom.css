@@ -1,0 +1,40 @@
+/**
+ * Workforce Management documentation theme.
+ * Green primary: labor/staffing, distinct from the sibling services.
+ */
+
+:root {
+  --ifm-color-primary: #1a7f4b;
+  --ifm-color-primary-dark: #177244;
+  --ifm-color-primary-darker: #166b40;
+  --ifm-color-primary-darkest: #125835;
+  --ifm-color-primary-light: #1d8c52;
+  --ifm-color-primary-lighter: #1e9356;
+  --ifm-color-primary-lightest: #23a862;
+  --ifm-code-font-size: 92%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.08);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #4ecb84;
+  --ifm-color-primary-dark: #35c272;
+  --ifm-color-primary-darker: #2ebb6a;
+  --ifm-color-primary-darkest: #269a58;
+  --ifm-color-primary-light: #67d496;
+  --ifm-color-primary-lighter: #74d89f;
+  --ifm-color-primary-lightest: #9be3bc;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+.markdown table {
+  display: table;
+  width: 100%;
+}
+
+.markdown table th {
+  text-align: left;
+}
+
+article .theme-doc-markdown h2 {
+  margin-top: 2.4rem;
+}
