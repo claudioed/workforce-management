@@ -1,0 +1,32 @@
+# .gremlins.yaml — mutation-testing configuration for workforce-management.
+#
+# gremlins (github.com/go-gremlins/gremlins, pinned to v0.6.0 in CI) reads this
+# file automatically from the Go module root, so the `mutation-fast` CI job, the
+# scheduled exhaustive `mutation` CI job and the local `make mutation` /
+# `make mutation-full` targets all run with identical settings.
+#
+# Mutation testing is the sensor that tells us whether the tests actually
+# ASSERT rather than merely execute. The thresholds below turn it into a
+# blocking quality gate instead of a report.
+silent: false
+
+unleash:
+  # A single worker with a generous timeout coefficient — the same execution
+  # settings the `mutation` CI job has always passed on the command line.
+  # Parallel workers contend over the build cache on a module this small and
+  # produce spurious TIMED OUT results.
+  workers: 1
+  timeout-coefficient: 30
+
+  threshold:
+    # NOTE: gremlins fails when the measured value is <= the threshold
+    # (internal/report/report.go), so a threshold must sit strictly BELOW the
+    # number we can meet today. Measured on 2026-08-23 with gremlins v0.6.0:
+    # efficacy 100.00% and mutator coverage 100.00% on both
+    # ./internal/domain/shiftplan (the fast blocking subset — 10 mutants, all
+    # killed, 35s) and the exhaustive ./internal/domain run (23 mutants, all
+    # killed, 47s). 99 therefore locks in today's quality and fails the build
+    # the moment a single mutant survives — the same "gate just under what we
+    # already achieve" approach as the 90% coverage gate in ci.yml.
+    efficacy: 99
+    mutant-coverage: 99

@@ -1,0 +1,53 @@
+# Dependabot — the dependency-drift sensor.
+#
+# Pairs with the `vuln` (govulncheck) CI job: govulncheck tells us when a
+# dependency we already have is known-vulnerable; dependabot keeps us from
+# drifting so far behind that upgrading is a project of its own.
+version: 2
+
+updates:
+  # Go module dependencies.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      include: scope
+    labels:
+      - dependencies
+      - go
+    groups:
+      # One PR per week for the routine, low-risk churn; majors stay separate
+      # so they get reviewed on their own.
+      go-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # Pinned action versions and the go-version used by setup-go.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      github-actions-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch

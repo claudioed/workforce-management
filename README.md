@@ -238,6 +238,37 @@ docker exec warehouse-kafka /opt/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 --topic warehouse.workforce.events --from-beginning --max-messages 2
 ```
 
+## Local development / quality gate
+
+Every CI sensor is also a `make` target, so the same feedback is available
+locally, before you commit. `make help` lists them all.
+
+```sh
+make check        # fast pre-commit loop: fmt-check, vet, build, lint, test (-race)
+make check-all    # before pushing: check + coverage gate (90%), arch-test, bdd
+make vuln         # govulncheck ./... — known CVEs in deps and the Go stdlib
+make mutation     # fast gremlins subset (blocks in CI); mutation-full = exhaustive
+make integration  # needs a running Postgres + DATABASE_URL (not part of check)
+```
+
+Git hooks are managed with [lefthook](https://github.com/evilmartians/lefthook)
+and configured in [`lefthook.yml`](lefthook.yml) — `pre-commit` runs
+`make fmt-check vet lint`, `pre-push` runs `make check`. Hooks live in
+`.git/hooks/`, which is not tracked, so activate them once per clone:
+
+```sh
+brew install lefthook     # or: go install github.com/evilmartians/lefthook@latest
+lefthook install
+```
+
+`make lint` expects `golangci-lint` on your PATH at the version CI pins:
+
+```sh
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
+go install golang.org/x/vuln/cmd/govulncheck@latest
+```
+
 ## Test
 
 ```bash

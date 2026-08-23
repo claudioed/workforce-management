@@ -122,6 +122,28 @@ JSON DTOs live in the http adapter; never leak domain structs directly.
   endpoint; build-tagged Postgres integration test (skipped w/o DATABASE_URL).
 - gofmt/go vet clean; every package has a doc comment.
 
+## Local quality gate (run before every commit)
+
+- After making changes and **before committing**, run `make check`. That is the
+  fast self-correction loop: `fmt-check`, `vet`, `build`, `lint`, `test`
+  (`go test ./... -race`). It needs no database and finishes in about a minute.
+- **Before pushing**, run `make check-all` — `check` plus the 90% `coverage`
+  gate, `arch-test` (hexagonal fitness) and `bdd` (godog/Gherkin acceptance).
+- Run `make vuln` (`govulncheck ./...`) after touching `go.mod`/`go.sum`; it is
+  a blocking CI job and it flags known CVEs in the dependency graph and stdlib.
+- `make mutation` runs the fast gremlins subset that blocks in CI
+  (`./internal/domain/shiftplan`, thresholds in `.gremlins.yaml`);
+  `make mutation-full` is the exhaustive scheduled run over `./internal/domain`.
+- `make integration` needs a running Postgres and `DATABASE_URL`; it is
+  deliberately outside `check`/`check-all`.
+- The lefthook git hooks enforce this automatically once you have run
+  `lefthook install` locally (pre-commit: fmt-check/vet/lint; pre-push:
+  `make check`) — but run `make check` proactively rather than relying on the
+  hook, since hooks are per-clone and may not be installed.
+- Why: it keeps quality *left* (harness engineering) — the CI sensors are
+  available locally so problems are caught and self-corrected before they ever
+  reach a human reviewer or the pipeline.
+
 ## Definition of done
 
 - `go build ./...`, `go vet ./...`, `go test ./...` (and `-race`) all green.
