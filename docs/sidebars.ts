@@ -89,6 +89,7 @@ const sidebars: SidebarsConfig = {
         'adr/0006-godog-bdd-acceptance-tests',
         'adr/0007-arch-go-architecture-fitness-tests',
         'adr/0008-mcp-inbound-adapter',
+        'adr/0009-hazmat-certification-via-existing-path-gating',
       ],
     },
   ],

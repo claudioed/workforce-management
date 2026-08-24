@@ -290,6 +290,44 @@ func TestAssignLabor_RejectsMissingCertification(t *testing.T) {
 	}
 }
 
+// TestAssignLabor_HazmatPath is an illustrative test, not a new behaviour.
+// It applies the ALREADY-EXISTING path-name-equals-certification-name gate
+// (documented in ADR 0003 and internal/application/usecases/assign_labor.go)
+// to a hazmat-designated path specifically, since "hazmat" is a real,
+// documented Certification value (see CLAUDE.md's Ubiquitous Language and
+// docs/docs/business-context/ubiquitous-language.md) and not a hypothetical
+// one. No new aggregate, port, or use-case logic is introduced by this test
+// or by ADR 0009 — the same generic certified/uncertified assertions as
+// TestAssignLabor_Succeeds and TestAssignLabor_RejectsMissingCertification
+// above, run against pathId "hazmat" instead of "pack".
+func TestAssignLabor_HazmatPath(t *testing.T) {
+	t.Run("rejects an associate without the hazmat certification", func(t *testing.T) {
+		f := newFixtures()
+		setupCertifiedAssociate(t, f, "assoc-1", "pack")
+
+		uc := &AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+		_, err := uc.Execute(context.Background(), "assoc-1", "hazmat")
+		if !errors.Is(err, assignment.ErrCertificationRequired) {
+			t.Fatalf("expected ErrCertificationRequired, got %v", err)
+		}
+	})
+
+	t.Run("accepts an associate holding the hazmat certification", func(t *testing.T) {
+		f := newFixtures()
+		setupCertifiedAssociate(t, f, "assoc-2", "hazmat")
+
+		uc := &AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}
+		la, err := uc.Execute(context.Background(), "assoc-2", "hazmat")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		pathId, active := la.ActivePathId()
+		if !active || pathId != "hazmat" {
+			t.Fatalf("expected active assignment to hazmat, got %v active=%v", pathId, active)
+		}
+	})
+}
+
 // TestAssignLabor_RejectsWhileOnBreak is a Definition-of-Done named
 // failing-path test at the application layer.
 func TestAssignLabor_RejectsWhileOnBreak(t *testing.T) {

@@ -92,12 +92,16 @@ if !hasCertification {
 
 Rejected with `409`. A path's required certification is, by convention, the
 `Certification` with the same name as the `PathId` — path `pack` requires
-certification `pack`.
+certification `pack`. This convention is generic: a hazmat-designated path
+named `hazmat` is gated the same way, requiring certification `hazmat`,
+with no hazmat-specific code — see
+[ADR 0009](../adr/0009-hazmat-certification-via-existing-path-gating.md).
 
 | Layer | Test |
 | --- | --- |
 | Domain | `assignment.TestAssign_RejectsMissingCertification` |
 | Application | `usecases.TestAssignLabor_RejectsMissingCertification` |
+| Application (hazmat, illustrative) | `usecases.TestAssignLabor_HazmatPath` |
 | HTTP | `http.TestAssignLabor_RejectsMissingCertification` |
 
 Training is itself a path that consumes hours. It is deliberately **not**
