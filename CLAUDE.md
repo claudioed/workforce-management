@@ -39,6 +39,26 @@ internal/
 migrations/                   golang-migrate SQL files
 ```
 
+## Analytics data product (ADR-0010)
+
+Additive read side built from this service's OWN domain events. The OLTP
+domain/application layers are NOT modified and must NOT import the analytics
+store (arch-test enforces). `internal/analytics/report/` depends on nothing.
+(`ProcessedEvents` in application/ports is the shared idempotency gate, used
+only by the analytics projector — the OLTP write path does not depend on it.)
+
+- Events are fanned to a SEPARATE topic `warehouse.workforce.analytics` by a new
+  outbound adapter; the integration topic/publisher are untouched. Selected by
+  `EVENT_PUBLISHER=kafka` (fan-out alongside the integration publisher).
+- Separate analytical Postgres (`ANALYTICS_DATABASE_URL`), own migrations
+  (`migrations/analytics/`), read-only reader role.
+- Three processes: `cmd/workforce` (OLTP), `cmd/workforce-projector` (the ONLY
+  writer; consumes from FirstOffset, idempotent on event_id),
+  `cmd/workforce-reports` (read-only reader, `GET /reports/...`). MCP report tool too.
+- Report: **Labor Utilization & Staffing**, keyed per path/shift × hour (shifts
+  started/ended, break time, labor assigned/reassigned, understaffing).
+- `GET /reports/.../freshness` reports projection lag.
+
 ## Ubiquitous Language (use these exact names — do not invent synonyms)
 
 - **ShiftPlan** — the committed split of headcount across paths for one shift.
@@ -54,7 +74,14 @@ migrations/                   golang-migrate SQL files
 - **Certification** — a named qualification (e.g. "pack", "hazmat", "pick").
   An associate untrained on a path cannot be assigned to it; training is itself
   a path that consumes hours (do not special-case that here — just enforce the
-  gate on assignment).
+  gate on assignment). `"hazmat"` is a REAL, in-use value, not hypothetical:
+  a path literally named `"hazmat"` requires the associate hold the `"hazmat"`
+  certification, via the existing path-name-equals-certification-name
+  convention — no new code was needed to support it (ADR-0009). This is the
+  independent, path-level half of hazmat handling; `fulfillment-execution`
+  separately gates hazmat at the station-capability level for individual task
+  claims — different bounded context, different mechanism, same real-world
+  concern.
 - **PathUnderstaffed** — a flag, not a decision: plannedHeads(path) not currently
   met by active assignments. Surfacing the gap, not moving anyone, is this
   context's job — moving people is a human call recorded via CommitAssignment.

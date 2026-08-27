@@ -46,7 +46,10 @@ Hexagonal / Ports & Adapters. Domain depends on nothing; application depends
 on domain; adapters depend on application/domain.
 
 ```
-cmd/workforce/                composition root
+cmd/workforce/                composition root (OLTP)
+cmd/workforce-projector/      analytics writer: consumes the analytics topic, projects
+cmd/workforce-reports/        analytics reader: read-only REST over the analytical DB
+cmd/mcp/                       MCP server (Streamable HTTP)
 internal/
   domain/
     associate/                 AssociateShift aggregate
@@ -54,15 +57,23 @@ internal/
     assignment/                LaborAssignment aggregate
     shared/                    value objects + domain events
   application/
-    ports/                     AssociateRepo, ShiftPlanRepo, AssignmentRepo, EventPublisher, Clock
+    ports/                     AssociateRepo, ShiftPlanRepo, AssignmentRepo, EventPublisher, ProcessedEvents, Clock
     usecases/                  one struct per use case
+  analytics/
+    report/                    Labor Utilization & Staffing read model + ports (depends on nothing)
   adapters/
-    inbound/http/               chi handlers, DTOs, error mapping
+    inbound/http/               chi handlers (OLTP + reports), DTOs, error mapping
+    inbound/kafka/              analytics consumer (projector)
+    inbound/mcp/                MCP tools incl. the curated labor-report tool
     outbound/postgres/          pgxpool repos + golang-migrate migrations
+    outbound/analyticsstore/    analytical projection (writer) + report (read-only reader) + memory store
     outbound/memory/            in-memory repos for tests/local
-    outbound/events/            log/buffered publisher (kafka-ready interface)
+    outbound/events/            log/buffered publisher + multi (fan-out) publisher
     outbound/clock/             system clock
-migrations/                   golang-migrate SQL files
+    outbound/kafka/             integration publisher + analytics publisher + trace-context header carrier
+    outbound/telemetry/         OTel setup (traces/metrics) + trace-aware slog handler
+migrations/                   golang-migrate SQL files (OLTP)
+migrations/analytics/         golang-migrate SQL files (analytical DB, owned by the projector)
 ```
 
 ## Design decisions worth calling out
@@ -111,6 +122,60 @@ Env vars:
 | `MAX_HOURS_PER_SHIFT` | no | `8` | the configured max-hours-per-shift cap |
 | `EVENT_PUBLISHER` | no | `log` | `log` or `kafka` — see [Integration](#integration) |
 | `KAFKA_BROKERS` | no | `localhost:9092` | comma-separated broker list, used when `EVENT_PUBLISHER=kafka` |
+| `LOG_LEVEL` | no | `info` | `debug`\|`info`\|`warn`\|`error` (case-insensitive) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no | `localhost:4317` | OTel Collector gRPC endpoint — see [Observability](#observability) |
+| `OTEL_SERVICE_NAME` | no | `workforce-management` | `service.name` resource attribute |
+| `SERVICE_VERSION` | no | `dev` | `service.version` resource attribute (overridable at build time with `-ldflags "-X main.version=..."`) |
+| `ENVIRONMENT` | no | `local` | `deployment.environment.name` resource attribute |
+
+## Analytics data product (Labor Utilization & Staffing report)
+
+An additive, isolated analytical read model built from this service's own domain
+events — a lightweight data mesh with no central platform. It runs as **two more
+processes and a separate analytical database**; the OLTP write path is untouched.
+See [ADR-0010](docs/docs/adr/0010-analytical-data-product.md) and the
+[report contract](docs/docs/analytics/labor-report.md).
+
+The OLTP service fans domain events onto a **separate** analytics topic
+(`warehouse.workforce.analytics`) when `EVENT_PUBLISHER=kafka`; the integration
+topic and publisher are left untouched.
+
+```bash
+# 1. shared broker already running (~/warehouse-systems/docker-compose.kafka.yml)
+#    and an analytical Postgres database reachable via ANALYTICS_DATABASE_URL.
+
+# 2. OLTP service, fanning events onto the analytics topic:
+export EVENT_PUBLISHER=kafka
+export KAFKA_BROKERS=localhost:9092
+go run ./cmd/workforce
+
+# 3. Projector — the ONLY writer of the analytical DB. Runs migrations/analytics
+#    on start, consumes the analytics topic from the earliest offset, projects:
+export ANALYTICS_DATABASE_URL="postgres://workforce:***@localhost:5432/workforce_analytics?sslmode=disable"
+go run ./cmd/workforce-projector      # admin/health on :8091
+
+# 4. Reports — read-only reader over the analytical DB, serves REST:
+export ANALYTICS_DATABASE_URL="postgres://workforce_ro:***@localhost:5432/workforce_analytics?sslmode=disable"
+go run ./cmd/workforce-reports        # :8092
+
+# 5. Query the report:
+curl 'http://localhost:8092/reports/labor?from=2026-01-01T00:00:00Z&to=2026-12-31T00:00:00Z'
+curl 'http://localhost:8092/reports/labor/freshness'
+```
+
+Analytics env vars (projector + reports):
+
+| Var | Required | Default | Meaning |
+|-----|----------|---------|---------|
+| `ANALYTICS_DATABASE_URL` | yes | — | analytical Postgres connection string (a **read-only** role for `workforce-reports`) |
+| `ANALYTICS_MIGRATIONS_PATH` | no | `migrations/analytics` | projector-only: path to the analytical migrations |
+| `KAFKA_BROKERS` | no | `localhost:9092` | projector-only: broker list for the analytics topic |
+| `ADMIN_ADDR` | no | `:8091` | projector-only: health endpoint listen address |
+| `HTTP_ADDR` | no | `:8092` | reports-only: REST listen address |
+
+Optionally expose the curated read-only MCP tool `get_workforce_labor_report`
+by setting `REPORTS_BASE_URL` (e.g. `http://localhost:8092`) on `cmd/mcp`; it
+calls the reports REST and never opens the analytical database itself.
 
 ## API
 
@@ -237,6 +302,64 @@ curl -X POST localhost:8080/shift-plans \
 docker exec warehouse-kafka /opt/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 --topic warehouse.workforce.events --from-beginning --max-messages 2
 ```
+
+## Observability
+
+Traces and metrics are exported over **OTLP/gRPC** to an OpenTelemetry
+Collector; logs are structured JSON on stdout, correlated to traces by
+`trace_id`/`span_id`. There is no `/metrics` scrape endpoint on this service
+— the Collector does Prometheus exposition, so the pod only pushes.
+
+A Collector is expected at `OTEL_EXPORTER_OTLP_ENDPOINT` (default
+`localhost:4317`). In the `warehouse-infra` kind cluster the Helm chart points
+this at the in-cluster Collector Service
+(`otel-collector.observability.svc.cluster.local:4317`, see `otel.endpoint` in
+`charts/workforce-management/values.yaml`).
+
+**If no Collector is reachable, nothing breaks.** The OTLP exporters are
+non-blocking — no `grpc.WithBlock()` dial option — so telemetry is silently
+dropped while the service starts and serves exactly as it otherwise would.
+That is enforced by a test
+(`TestSetupDoesNotBlockWithoutACollector`), not just by convention.
+
+### What gets exported
+
+| Signal | What |
+|--------|------|
+| Traces | one server span per HTTP request, named by **route pattern** (`POST /associates/{id}/assignments`), not the raw path, so span-name cardinality stays bounded by the route table |
+| Traces | a client child span per Postgres round-trip via `otelpgx`, carrying the **parameterized** SQL (`$1`, `$2`, … — literal values are never recorded) |
+| Traces | a `kafka.publish warehouse.workforce.events` producer span, with W3C trace context injected into each message's Kafka headers so a consumer's span is a child of ours |
+| Metrics | `http.server.request.duration` (histogram, seconds, OTel HTTP semconv) |
+| Metrics | `workforce.labor_assignments` (counter) — every `AssignLabor` attempt, attributed `workforce.assignment.outcome=accepted\|rejected`, `workforce.path.id`, and on rejection `workforce.assignment.reason` (`uncertified`, `on_break`, `shift_ended`, `max_hours_exceeded`, `associate_not_found`, `internal_error`) |
+| Metrics | Go runtime metrics (goroutines, GC, memory) via `contrib/instrumentation/runtime` |
+| Logs | JSON to stdout via `log/slog`, level from `LOG_LEVEL`; request-scoped lines carry `trace_id`, `span_id`, `route` and `request_id` |
+
+`workforce.labor_assignments` is instrumented **in the use case**, not in the
+HTTP handler, so it counts real domain outcomes rather than requests. Note
+there is no `double_booked` rejection reason: this context resolves a second
+active assignment by ending the prior one and raising `LaborReassigned`, so
+double-booking is prevented by construction rather than rejected — see
+`LaborAssignment.Assign`.
+
+### Seeing it locally
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317   # or leave unset
+go run ./cmd/workforce
+curl -s localhost:8080/healthz
+```
+
+Each request emits a log line like:
+
+```json
+{"time":"...","level":"INFO","msg":"http request","method":"POST",
+ "path":"/associates/A-100/assignments","route":"/associates/{id}/assignments",
+ "status":201,"duration_ms":4,"bytes":60,"request_id":"...",
+ "trace_id":"60b0a70a6ebad03fb2e4b4d05246c4ba","span_id":"3c745e4adb43be47"}
+```
+
+Paste that `trace_id` into Jaeger/Tempo to jump straight from the log line to
+the trace, including its Postgres child spans.
 
 ## Local development / quality gate
 

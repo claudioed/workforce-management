@@ -1,0 +1,203 @@
+package mcp
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/claudioed/workforce-management/internal/application/usecases"
+	"github.com/claudioed/workforce-management/internal/domain/shared"
+)
+
+// tracerName is the OTel instrumentation scope for MCP tool spans.
+const tracerName = "github.com/claudioed/workforce-management/internal/adapters/inbound/mcp"
+
+// Deps is everything the MCP tools need, injected by the composition root.
+// It carries the same use cases the HTTP adapter uses; the adapter never
+// constructs an outbound adapter itself.
+type Deps struct {
+	// GetStaffingGap is the existing read-model use case, reused unchanged.
+	// It may raise PathUnderstaffed when a path is understaffed; that
+	// behaviour is preserved — the tool simply reports the gap.
+	GetStaffingGap *usecases.GetStaffingGap
+	// ProposePathPlan is the existing pure-computation use case (heads needed
+	// to cover a charge at a planned rate). It persists nothing.
+	ProposePathPlan *usecases.ProposePathPlan
+	// AssignLabor is the existing write use case, reused unchanged. Its domain
+	// invariants (exactly one ACTIVE assignment per associate, certification
+	// match required) make a model-invoked assignment safe by construction.
+	AssignLabor *usecases.AssignLabor
+	// Reports is the client of the workforce-reports REST service, backing the
+	// curated get_workforce_labor_report tool. When nil, that tool is not
+	// registered (an MCP deployment without the reports service).
+	Reports ReportsClient
+}
+
+// --- get_staffing_gap ---------------------------------------------------------
+
+type staffingGapInput struct {
+	BuildingId string `json:"buildingId" jsonschema:"the building whose committed shift plan holds this path"`
+	ShiftId    string `json:"shiftId" jsonschema:"the shift whose committed plan to read the gap from"`
+	PathId     string `json:"pathId" jsonschema:"the process path to measure planned-vs-active heads for (e.g. pack, pick, stow)"`
+}
+
+func (d Deps) getStaffingGap(ctx context.Context, in staffingGapInput) (staffingGap, error) {
+	if in.BuildingId == "" || in.ShiftId == "" || in.PathId == "" {
+		return staffingGap{}, fmt.Errorf("buildingId, shiftId and pathId are required")
+	}
+	gap, err := d.GetStaffingGap.Execute(ctx, in.BuildingId, in.ShiftId, shared.PathId(in.PathId))
+	if err != nil {
+		return staffingGap{}, err
+	}
+	return toStaffingGap(in.BuildingId, in.ShiftId, gap), nil
+}
+
+// --- propose_path_heads -------------------------------------------------------
+
+type proposeHeadsInput struct {
+	BuildingId  string  `json:"buildingId" jsonschema:"the building the proposal is for"`
+	PathId      string  `json:"pathId" jsonschema:"the process path to size (e.g. pack, pick, stow)"`
+	Charge      float64 `json:"charge" jsonschema:"the work charge (units) the path must clear this shift"`
+	PlannedRate float64 `json:"plannedRate" jsonschema:"the planned rate (units per head) used to size headcount; must be greater than zero"`
+}
+
+type proposeHeadsOutput struct {
+	BuildingId    string  `json:"buildingId"`
+	PathId        string  `json:"pathId"`
+	Charge        float64 `json:"charge"`
+	PlannedRate   float64 `json:"plannedRate"`
+	ProposedHeads int     `json:"proposedHeads"`
+}
+
+func (d Deps) proposePathHeads(ctx context.Context, in proposeHeadsInput) (proposeHeadsOutput, error) {
+	if in.BuildingId == "" || in.PathId == "" {
+		return proposeHeadsOutput{}, fmt.Errorf("buildingId and pathId are required")
+	}
+	if in.Charge < 0 {
+		return proposeHeadsOutput{}, fmt.Errorf("charge must not be negative")
+	}
+	if in.PlannedRate <= 0 {
+		return proposeHeadsOutput{}, fmt.Errorf("plannedRate must be greater than zero")
+	}
+	heads, err := d.ProposePathPlan.Execute(ctx, in.BuildingId, shared.PathId(in.PathId), in.Charge, in.PlannedRate)
+	if err != nil {
+		return proposeHeadsOutput{}, err
+	}
+	return proposeHeadsOutput{
+		BuildingId:    in.BuildingId,
+		PathId:        in.PathId,
+		Charge:        in.Charge,
+		PlannedRate:   in.PlannedRate,
+		ProposedHeads: heads,
+	}, nil
+}
+
+// --- assign_labor (write) -----------------------------------------------------
+
+type assignLaborInput struct {
+	AssociateId string `json:"associateId" jsonschema:"the associate to place on the path"`
+	PathId      string `json:"pathId" jsonschema:"the process path to assign the associate to; the associate must hold the matching certification"`
+}
+
+func (d Deps) assignLabor(ctx context.Context, in assignLaborInput) (laborAssignmentView, error) {
+	if in.AssociateId == "" || in.PathId == "" {
+		return laborAssignmentView{}, fmt.Errorf("associateId and pathId are required")
+	}
+	la, err := d.AssignLabor.Execute(ctx, shared.AssociateId(in.AssociateId), shared.PathId(in.PathId))
+	if err != nil {
+		// The use case's domain errors (associate not found, lacks the required
+		// certification, is on break, shift ended) surface unchanged as the tool
+		// error; the single-active-assignment and certification-match invariants
+		// make a mistaken model call safe.
+		return laborAssignmentView{}, err
+	}
+	activePath, _ := la.ActivePathId()
+	return laborAssignmentView{
+		AssociateId: string(la.AssociateId()),
+		PathId:      string(activePath),
+		// LaborAssignment is keyed by associate (one active assignment per
+		// associate is a structural invariant, ADR-0003), so the associate id
+		// scoped by the active path is the assignment's stable identity.
+		AssignmentId: fmt.Sprintf("%s@%s", la.AssociateId(), activePath),
+	}, nil
+}
+
+// --- registration -------------------------------------------------------------
+
+// registerTools adds every tool to the server, each wrapped so its handler
+// runs inside an OTel span named "mcp.tool <name>" and is gated by the
+// session's scope. Read tools require ScopeRead; the write tool requires
+// ScopeReadWrite.
+func (d Deps) registerTools(server *mcp.Server, scopeOf func(context.Context) Scope) {
+	readOnly := true
+
+	addTool(server, scopeOf, ScopeRead, &mcp.Tool{
+		Name:        "get_staffing_gap",
+		Description: "Return planned vs active heads for a process path within a building's committed shift plan, and whether it is understaffed. Read-only; surfaces the gap, it does not move anyone.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly},
+	}, d.getStaffingGap)
+
+	addTool(server, scopeOf, ScopeRead, &mcp.Tool{
+		Name:        "propose_path_heads",
+		Description: "Compute the headcount needed to cover a path's charge at a planned rate (ceil(charge/rate)). A pure proposal; it commits nothing and a human still commits the shift plan.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly},
+	}, d.proposePathHeads)
+
+	// Write tool: assigns an associate to a path. Requires the read-write scope
+	// and is annotated destructive (non-read-only, non-idempotent) so a host
+	// can see it changes state before letting a model call it. The domain
+	// invariants (one active assignment per associate; certification match
+	// required) bound the risk of a mistaken call.
+	destructive := true
+	notIdempotent := false
+	addTool(server, scopeOf, ScopeReadWrite, &mcp.Tool{
+		Name:        "assign_labor",
+		Description: "Assign an associate to a process path, ending their prior active assignment if any. Rejected if the associate is unknown, lacks the path's required certification, is on break, or the shift has ended.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: notIdempotent},
+	}, d.assignLabor)
+
+	// Curated read-only data-product tool, registered only when the reports
+	// client is configured.
+	d.registerReportTool(server, scopeOf)
+}
+
+// addTool registers one scope-gated tool. It centralises the cross-cutting
+// concerns every tool shares: a span per call, scope enforcement against the
+// tool's required minimum scope, and mapping a handler error onto the span
+// before returning it.
+func addTool[In, Out any](
+	server *mcp.Server,
+	scopeOf func(context.Context) Scope,
+	required Scope,
+	tool *mcp.Tool,
+	handle func(context.Context, In) (Out, error),
+) {
+	mcp.AddTool(server, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+		var zero Out
+		ctx, span := otel.Tracer(tracerName).Start(ctx, "mcp.tool "+tool.Name,
+			trace.WithAttributes(
+				attribute.String("mcp.tool.name", tool.Name),
+				attribute.String("mcp.tool.required_scope", string(required)),
+			),
+		)
+		defer span.End()
+
+		if !scopeAllows(scopeOf(ctx), required) {
+			err := fmt.Errorf("tool %q requires %s scope", tool.Name, required)
+			span.SetStatus(codes.Error, "unauthorized")
+			return nil, zero, err
+		}
+
+		out, err := handle(ctx, in)
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return nil, zero, err
+		}
+		return nil, out, nil
+	})
+}

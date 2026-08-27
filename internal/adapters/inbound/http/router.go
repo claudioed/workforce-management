@@ -8,11 +8,17 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/riandyrn/otelchi"
+	otelchimetric "github.com/riandyrn/otelchi/metric"
 
 	"github.com/claudioed/workforce-management/internal/application/usecases"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
 	"github.com/claudioed/workforce-management/internal/domain/shiftplan"
 )
+
+// DefaultServiceName is the OTel service name this adapter reports when the
+// caller does not override it (via OTEL_SERVICE_NAME).
+const DefaultServiceName = "workforce-management"
 
 // Handler wires the Workforce Management use cases to chi routes.
 type Handler struct {
@@ -28,13 +34,28 @@ type Handler struct {
 }
 
 // NewRouter builds the chi router for the Workforce Management REST API.
-// A nil logger defaults to slog.Default().
-func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
+// A nil logger defaults to slog.Default(); an empty serviceName defaults to
+// DefaultServiceName.
+//
+// Middleware order matters: otelchi runs first so a span exists (and the
+// request context carries it) before RequestLogger emits its log line —
+// that is what puts trace_id/span_id on request logs.
+func NewRouter(h *Handler, logger *slog.Logger, serviceName string) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if serviceName == "" {
+		serviceName = DefaultServiceName
+	}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	// WithChiRoutes makes span names the route pattern
+	// (POST /associates/{id}/assignments) rather than the raw path, keeping
+	// span-name cardinality bounded by the route table.
+	r.Use(otelchi.Middleware(serviceName, otelchi.WithChiRoutes(r)))
+	r.Use(otelchimetric.NewServerRequestDuration(
+		otelchimetric.NewBaseConfig(serviceName),
+	))
 	r.Use(RequestLogger(logger))
 	r.Use(middleware.Recoverer)
 

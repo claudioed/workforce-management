@@ -12,6 +12,11 @@ import (
 	"time"
 
 	segmentio "github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/claudioed/workforce-management/internal/application/ports"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
@@ -19,6 +24,9 @@ import (
 
 // Topic is the shared warehouse-systems topic this service publishes to.
 const Topic = "warehouse.workforce.events"
+
+// tracerName identifies this adapter's instrumentation scope.
+const tracerName = "github.com/claudioed/workforce-management/internal/adapters/outbound/kafka"
 
 // source identifies this service in the published envelope.
 const source = "workforce-management"
@@ -82,6 +90,11 @@ func (p *Publisher) Close() error {
 // Publish fans ShiftPlanCommitted events out into one Kafka message per
 // PathPlan line. Other event types are ignored: this round only publishes
 // ShiftPlanCommitted, per INTEGRATION.md.
+//
+// Each published message carries the current span context in its headers so
+// downstream services' consume spans are children of this publish span —
+// that is what makes a workforce-management -> consumer trace a single
+// distributed trace rather than two unrelated ones.
 func (p *Publisher) Publish(ctx context.Context, events ...shared.DomainEvent) error {
 	var msgs []segmentio.Message
 	for _, e := range events {
@@ -118,12 +131,47 @@ func (p *Publisher) Publish(ctx context.Context, events ...shared.DomainEvent) e
 	if len(msgs) == 0 {
 		return nil
 	}
-	return p.writer.WriteMessages(ctx, msgs...)
+	return p.writeMessages(ctx, msgs)
+}
+
+// writeMessages wraps the broker write in a `kafka.publish <topic>` span (per
+// the OTel messaging semantic conventions) and injects that span's context
+// into every outgoing message's headers.
+func (p *Publisher) writeMessages(ctx context.Context, msgs []segmentio.Message) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "kafka.publish "+Topic,
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			semconv.MessagingSystemKafka,
+			semconv.MessagingOperationName("publish"),
+			semconv.MessagingDestinationName(Topic),
+			semconv.MessagingBatchMessageCount(len(msgs)),
+		),
+	)
+	defer span.End()
+
+	propagator := otel.GetTextMapPropagator()
+	for i := range msgs {
+		propagator.Inject(ctx, propagation.TextMapCarrier(headerCarrier{headers: &msgs[i].Headers}))
+	}
+
+	if err := p.writer.WriteMessages(ctx, msgs...); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
 }
 
 // newEventID generates a random UUID v4 without pulling in a UUID
 // dependency beyond what INTEGRATION.md already requires (kafka-go).
 func newEventID() string {
+	return NewEventID()
+}
+
+// NewEventID generates a random UUID v4. It is exported so a composition root
+// can supply it as the analytics publisher's envelope id minter without
+// duplicating the generator.
+func NewEventID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		panic(err)

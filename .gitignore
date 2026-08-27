@@ -2,3 +2,10 @@ bin/
 .env
 *.test
 *.out
+
+# Root-level built binaries (never commit compiled artifacts)
+/workforce-management
+/workforce
+/workforce-projector
+/workforce-reports
+/mcp

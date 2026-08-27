@@ -87,3 +87,6 @@ quietly delete the old one — the fact that it was tried is itself information.
 | [0005](./0005-rfc-7807-problem-details.md) | RFC 7807 Problem Details for every error response | Accepted |
 | [0006](./0006-godog-bdd-acceptance-tests.md) | godog acceptance specs driven through the real HTTP surface | Accepted |
 | [0007](./0007-arch-go-architecture-fitness-tests.md) | arch-go fitness tests to make the layering rule executable | Accepted |
+| [0008](./0008-mcp-inbound-adapter.md) | Model Context Protocol as an inbound adapter, not a new service | Accepted |
+| [0009](./0009-hazmat-certification-via-existing-path-gating.md) | Hazmat handling via the existing path-name-equals-certification-name gate | Accepted |
+| [0010](./0010-analytical-data-product.md) | Per-service analytical data product (report) via a separate analytics topic | Accepted |
