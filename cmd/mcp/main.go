@@ -105,6 +105,13 @@ func run() error {
 		ProposePathPlan: &usecases.ProposePathPlan{Events: publisher, Clock: sysClock},
 		AssignLabor:     &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift},
 	}
+	// Optional curated data-product tool: when REPORTS_BASE_URL is set, the MCP
+	// server exposes get_workforce_labor_report backed by the workforce-reports
+	// REST service (ADR-0010). It never opens the analytical database directly.
+	if reportsBaseURL := os.Getenv("REPORTS_BASE_URL"); reportsBaseURL != "" {
+		deps.Reports = inboundmcp.NewReportsRESTClient(reportsBaseURL, nil)
+		logger.Info("reports data-product tool enabled", "reports_base_url", reportsBaseURL)
+	}
 	server := inboundmcp.NewServer(deps)
 
 	auth := inboundmcp.NewStaticKeyAuth(authKeys(logger))

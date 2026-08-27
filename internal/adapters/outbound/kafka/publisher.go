@@ -165,6 +165,13 @@ func (p *Publisher) writeMessages(ctx context.Context, msgs []segmentio.Message)
 // newEventID generates a random UUID v4 without pulling in a UUID
 // dependency beyond what INTEGRATION.md already requires (kafka-go).
 func newEventID() string {
+	return NewEventID()
+}
+
+// NewEventID generates a random UUID v4. It is exported so a composition root
+// can supply it as the analytics publisher's envelope id minter without
+// duplicating the generator.
+func NewEventID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		panic(err)

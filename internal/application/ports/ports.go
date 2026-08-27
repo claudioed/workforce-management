@@ -40,6 +40,17 @@ type EventPublisher interface {
 	Publish(ctx context.Context, events ...shared.DomainEvent) error
 }
 
+// ProcessedEvents is the idempotency gate for at-least-once event consumption:
+// it records which event ids have already been handled so a redelivery is a
+// no-op. It is used by the analytics projector's inbound consumer; the OLTP
+// write path does not depend on it.
+type ProcessedEvents interface {
+	// MarkProcessed records eventId if absent, returning true iff this call
+	// newly recorded it (so the caller should process the event) and false if
+	// it was already seen (a duplicate to skip).
+	MarkProcessed(ctx context.Context, eventId string) (bool, error)
+}
+
 // Clock supplies the current time so domain logic never calls time.Now()
 // directly.
 type Clock interface {

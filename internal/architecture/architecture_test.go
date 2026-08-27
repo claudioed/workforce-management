@@ -108,6 +108,49 @@ func TestHexagonalDependencyRule(t *testing.T) {
 			},
 		})
 	})
+
+	// ADR-0010: the analytics data product is additive and isolated. The OLTP
+	// domain and application layers must never import the analytical read model
+	// region or its store adapter, so analytics work can never couple back into
+	// the transactional core.
+	t.Run("OLTP domain does not import the analytics region or store", func(t *testing.T) {
+		runDependenciesRule(t, &config.DependenciesRule{
+			Package: "**.internal.domain.**",
+			ShouldNotDependsOn: &config.Dependencies{
+				Internal: []string{
+					"**.internal.analytics.**",
+					"**.internal.adapters.outbound.analyticsstore.**",
+				},
+			},
+		})
+	})
+
+	t.Run("OLTP application does not import the analytics region or store", func(t *testing.T) {
+		runDependenciesRule(t, &config.DependenciesRule{
+			Package: "**.internal.application.**",
+			ShouldNotDependsOn: &config.Dependencies{
+				Internal: []string{
+					"**.internal.analytics.**",
+					"**.internal.adapters.outbound.analyticsstore.**",
+				},
+			},
+		})
+	})
+
+	// The analytics read-model region depends on nothing else in this module —
+	// not the OLTP domain, not the application layer, not any adapter.
+	t.Run("analytics report region depends on nothing internal", func(t *testing.T) {
+		runDependenciesRule(t, &config.DependenciesRule{
+			Package: "**.internal.analytics.**",
+			ShouldNotDependsOn: &config.Dependencies{
+				Internal: []string{
+					"**.internal.domain.**",
+					"**.internal.application.**",
+					"**.internal.adapters.**",
+				},
+			},
+		})
+	})
 }
 
 // TestPortsPackageIsInterfacesOnly is a bonus content-convention check: this

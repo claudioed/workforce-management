@@ -172,11 +172,20 @@ func newEventPublisher(shiftPlans ports.ShiftPlanRepo, logger *slog.Logger) (por
 	switch envOrDefault("EVENT_PUBLISHER", "log") {
 	case "kafka":
 		brokers := strings.Split(envOrDefault("KAFKA_BROKERS", "localhost:9092"), ",")
-		pub := kafka.NewPublisher(brokers, shiftPlans)
-		logger.Info("event publisher configured", "publisher", "kafka", "brokers", brokers, "topic", kafka.Topic)
+		integration := kafka.NewPublisher(brokers, shiftPlans)
+		// Fan-out: the same domain events also feed the analytics data product
+		// on a SEPARATE topic (ADR-0010). The integration publisher/topic is
+		// untouched; the analytics publisher is an additive second sink.
+		analytics := kafka.NewAnalyticsPublisher(brokers, kafka.NewEventID)
+		pub := events.NewMultiPublisher(integration, analytics)
+		logger.Info("event publisher configured", "publisher", "kafka",
+			"brokers", brokers, "topic", kafka.Topic, "analytics_topic", kafka.AnalyticsTopic)
 		return pub, func() {
-			if err := pub.Close(); err != nil {
+			if err := integration.Close(); err != nil {
 				logger.Error("kafka publisher close failed", "error", err)
+			}
+			if err := analytics.Close(); err != nil {
+				logger.Error("kafka analytics publisher close failed", "error", err)
 			}
 		}, nil
 	case "log":
