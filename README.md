@@ -46,7 +46,10 @@ Hexagonal / Ports & Adapters. Domain depends on nothing; application depends
 on domain; adapters depend on application/domain.
 
 ```
-cmd/workforce/                composition root
+cmd/workforce/                composition root (OLTP)
+cmd/workforce-projector/      analytics writer: consumes the analytics topic, projects
+cmd/workforce-reports/        analytics reader: read-only REST over the analytical DB
+cmd/mcp/                       MCP server (Streamable HTTP)
 internal/
   domain/
     associate/                 AssociateShift aggregate
@@ -54,17 +57,23 @@ internal/
     assignment/                LaborAssignment aggregate
     shared/                    value objects + domain events
   application/
-    ports/                     AssociateRepo, ShiftPlanRepo, AssignmentRepo, EventPublisher, Clock
+    ports/                     AssociateRepo, ShiftPlanRepo, AssignmentRepo, EventPublisher, ProcessedEvents, Clock
     usecases/                  one struct per use case
+  analytics/
+    report/                    Labor Utilization & Staffing read model + ports (depends on nothing)
   adapters/
-    inbound/http/               chi handlers, DTOs, error mapping
+    inbound/http/               chi handlers (OLTP + reports), DTOs, error mapping
+    inbound/kafka/              analytics consumer (projector)
+    inbound/mcp/                MCP tools incl. the curated labor-report tool
     outbound/postgres/          pgxpool repos + golang-migrate migrations
+    outbound/analyticsstore/    analytical projection (writer) + report (read-only reader) + memory store
     outbound/memory/            in-memory repos for tests/local
-    outbound/events/            log/buffered publisher (kafka-ready interface)
+    outbound/events/            log/buffered publisher + multi (fan-out) publisher
     outbound/clock/             system clock
-    outbound/kafka/             Kafka publisher + trace-context header carrier
+    outbound/kafka/             integration publisher + analytics publisher + trace-context header carrier
     outbound/telemetry/         OTel setup (traces/metrics) + trace-aware slog handler
-migrations/                   golang-migrate SQL files
+migrations/                   golang-migrate SQL files (OLTP)
+migrations/analytics/         golang-migrate SQL files (analytical DB, owned by the projector)
 ```
 
 ## Design decisions worth calling out
@@ -118,6 +127,55 @@ Env vars:
 | `OTEL_SERVICE_NAME` | no | `workforce-management` | `service.name` resource attribute |
 | `SERVICE_VERSION` | no | `dev` | `service.version` resource attribute (overridable at build time with `-ldflags "-X main.version=..."`) |
 | `ENVIRONMENT` | no | `local` | `deployment.environment.name` resource attribute |
+
+## Analytics data product (Labor Utilization & Staffing report)
+
+An additive, isolated analytical read model built from this service's own domain
+events — a lightweight data mesh with no central platform. It runs as **two more
+processes and a separate analytical database**; the OLTP write path is untouched.
+See [ADR-0010](docs/docs/adr/0010-analytical-data-product.md) and the
+[report contract](docs/docs/analytics/labor-report.md).
+
+The OLTP service fans domain events onto a **separate** analytics topic
+(`warehouse.workforce.analytics`) when `EVENT_PUBLISHER=kafka`; the integration
+topic and publisher are left untouched.
+
+```bash
+# 1. shared broker already running (~/warehouse-systems/docker-compose.kafka.yml)
+#    and an analytical Postgres database reachable via ANALYTICS_DATABASE_URL.
+
+# 2. OLTP service, fanning events onto the analytics topic:
+export EVENT_PUBLISHER=kafka
+export KAFKA_BROKERS=localhost:9092
+go run ./cmd/workforce
+
+# 3. Projector — the ONLY writer of the analytical DB. Runs migrations/analytics
+#    on start, consumes the analytics topic from the earliest offset, projects:
+export ANALYTICS_DATABASE_URL="postgres://workforce:***@localhost:5432/workforce_analytics?sslmode=disable"
+go run ./cmd/workforce-projector      # admin/health on :8091
+
+# 4. Reports — read-only reader over the analytical DB, serves REST:
+export ANALYTICS_DATABASE_URL="postgres://workforce_ro:***@localhost:5432/workforce_analytics?sslmode=disable"
+go run ./cmd/workforce-reports        # :8092
+
+# 5. Query the report:
+curl 'http://localhost:8092/reports/labor?from=2026-01-01T00:00:00Z&to=2026-12-31T00:00:00Z'
+curl 'http://localhost:8092/reports/labor/freshness'
+```
+
+Analytics env vars (projector + reports):
+
+| Var | Required | Default | Meaning |
+|-----|----------|---------|---------|
+| `ANALYTICS_DATABASE_URL` | yes | — | analytical Postgres connection string (a **read-only** role for `workforce-reports`) |
+| `ANALYTICS_MIGRATIONS_PATH` | no | `migrations/analytics` | projector-only: path to the analytical migrations |
+| `KAFKA_BROKERS` | no | `localhost:9092` | projector-only: broker list for the analytics topic |
+| `ADMIN_ADDR` | no | `:8091` | projector-only: health endpoint listen address |
+| `HTTP_ADDR` | no | `:8092` | reports-only: REST listen address |
+
+Optionally expose the curated read-only MCP tool `get_workforce_labor_report`
+by setting `REPORTS_BASE_URL` (e.g. `http://localhost:8092`) on `cmd/mcp`; it
+calls the reports REST and never opens the analytical database itself.
 
 ## API
 
