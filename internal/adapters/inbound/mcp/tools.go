@@ -32,6 +32,10 @@ type Deps struct {
 	// invariants (exactly one ACTIVE assignment per associate, certification
 	// match required) make a model-invoked assignment safe by construction.
 	AssignLabor *usecases.AssignLabor
+	// Reports is the client of the workforce-reports REST service, backing the
+	// curated get_workforce_labor_report tool. When nil, that tool is not
+	// registered (an MCP deployment without the reports service).
+	Reports ReportsClient
 }
 
 // --- get_staffing_gap ---------------------------------------------------------
@@ -156,6 +160,10 @@ func (d Deps) registerTools(server *mcp.Server, scopeOf func(context.Context) Sc
 		Description: "Assign an associate to a process path, ending their prior active assignment if any. Rejected if the associate is unknown, lacks the path's required certification, is on break, or the shift has ended.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: notIdempotent},
 	}, d.assignLabor)
+
+	// Curated read-only data-product tool, registered only when the reports
+	// client is configured.
+	d.registerReportTool(server, scopeOf)
 }
 
 // addTool registers one scope-gated tool. It centralises the cross-cutting
