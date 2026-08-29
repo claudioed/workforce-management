@@ -302,7 +302,7 @@ jobs:
             --type spdxjson \
             claudioed/workforce-management@${{ steps.build.outputs.digest }}
       - name: Upload SBOM as a workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: sbom.spdx.json
