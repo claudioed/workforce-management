@@ -220,7 +220,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
       - name: Build image (local only, not pushed)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -302,7 +302,7 @@ jobs:
             --type spdxjson \
             claudioed/workforce-management@${{ steps.build.outputs.digest }}
       - name: Upload SBOM as a workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: sbom.spdx.json
