@@ -97,6 +97,7 @@ const sidebars: SidebarsConfig = {
         'adr/0008-mcp-inbound-adapter',
         'adr/0009-hazmat-certification-via-existing-path-gating',
         'adr/0010-analytical-data-product',
+        'adr/0011-adopt-fleet-mfe-console-architecture',
       ],
     },
   ],

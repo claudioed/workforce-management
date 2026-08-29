@@ -160,3 +160,24 @@ The one place this shape shows up in the API is `CommitShiftPlan`, which takes
 runtime dependency on a Core context in order to validate a Supporting
 context's own invariant would invert the risk. So the caller carries the
 numbers, and this context validates against them independently.
+
+## Presentation-layer composition (not a domain-coupling edge)
+
+`warehouse-ops-agent`'s fleet-wide ADR-0002 adds a seventh axis to this map
+that is deliberately absent from the diagrams above: `warehouse-console`, a
+Module Federation shell, composes one remote per bounded context at the UI
+layer, including `workforce-mfe` (this context's own `web/`). This context's
+adoption of that decision is recorded in
+[ADR-0011](../adr/0011-adopt-fleet-mfe-console-architecture.md).
+
+This is **not** a new domain relationship and is not drawn as an edge above:
+`workforce-mfe` talks only to this service's own REST API
+(`WORKFORCE_API_BASE`), never to a sibling's API or database, and the shell
+contains none of this context's business logic. It does not change this
+context's outbound-edge count (still one Kafka topic published, zero
+consumed, zero synchronous calls to any sibling) — it is a browser composing
+independently-owned screens, not a new integration contract between bounded
+contexts. The one cross-cutting exception in the fleet (the Order Lifecycle
+view, backed by a BFF in `warehouse-ops-agent`) does not read this context's
+data at all today; this context is not one of the four services the BFF's
+fan-out queries.
