@@ -84,7 +84,10 @@ func (d Deps) proposePathHeads(ctx context.Context, in proposeHeadsInput) (propo
 	if in.PlannedRate <= 0 {
 		return proposeHeadsOutput{}, fmt.Errorf("plannedRate must be greater than zero")
 	}
-	heads, err := d.ProposePathPlan.Execute(ctx, in.BuildingId, shared.PathId(in.PathId), in.Charge, in.PlannedRate)
+	// This tool requires plannedRate > 0 above, so ProposePathPlan never
+	// consults the measured-rate fallback here; only rate-agnostic values
+	// (heads) are relevant to this MCP tool's existing output contract.
+	heads, _, _, err := d.ProposePathPlan.Execute(ctx, in.BuildingId, shared.PathId(in.PathId), in.Charge, in.PlannedRate)
 	if err != nil {
 		return proposeHeadsOutput{}, err
 	}

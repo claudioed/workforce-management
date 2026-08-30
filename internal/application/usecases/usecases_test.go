@@ -198,12 +198,132 @@ func TestCertifyAssociate_NotFound(t *testing.T) {
 func TestProposePathPlan_ComputesCeil(t *testing.T) {
 	f := newFixtures()
 	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock}
-	heads, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
+	heads, resolvedRate, rateSource, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if heads != 4 {
 		t.Fatalf("expected 4 heads, got %d", heads)
+	}
+	if resolvedRate != 30 {
+		t.Fatalf("expected resolvedRate 30, got %v", resolvedRate)
+	}
+	if rateSource != RateSourceCaller {
+		t.Fatalf("expected rateSource %q, got %q", RateSourceCaller, rateSource)
+	}
+}
+
+// fakeMeasuredRateClient is a test double for ports.MeasuredRateClient.
+type fakeMeasuredRateClient struct {
+	seconds float64
+	err     error
+	called  bool
+}
+
+func (f *fakeMeasuredRateClient) MeanActualSeconds(_ context.Context, _ shared.PathId) (float64, error) {
+	f.called = true
+	return f.seconds, f.err
+}
+
+// TestProposePathPlan_FallsBackToMeasuredRateWhenNoCallerRate covers the
+// core close-the-loop behaviour: an omitted (<=0) plannedRate consults
+// MeasuredRate and uses it when available.
+func TestProposePathPlan_FallsBackToMeasuredRateWhenNoCallerRate(t *testing.T) {
+	f := newFixtures()
+	measured := &fakeMeasuredRateClient{seconds: 25}
+	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, MeasuredRate: measured}
+
+	heads, resolvedRate, rateSource, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !measured.called {
+		t.Fatal("expected MeasuredRate to be consulted when plannedRate is not supplied")
+	}
+	if resolvedRate != 25 {
+		t.Fatalf("expected resolvedRate 25, got %v", resolvedRate)
+	}
+	if rateSource != RateSourceMeasured {
+		t.Fatalf("expected rateSource %q, got %q", RateSourceMeasured, rateSource)
+	}
+	if heads != 4 { // ceil(100/25)
+		t.Fatalf("expected 4 heads, got %d", heads)
+	}
+}
+
+// TestProposePathPlan_CallerRateAlwaysWinsOverMeasured covers the other
+// half of the contract: a caller-supplied rate is never overridden by a
+// measured one, and MeasuredRate is not even consulted.
+func TestProposePathPlan_CallerRateAlwaysWinsOverMeasured(t *testing.T) {
+	f := newFixtures()
+	measured := &fakeMeasuredRateClient{seconds: 999}
+	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, MeasuredRate: measured}
+
+	heads, resolvedRate, rateSource, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if measured.called {
+		t.Fatal("expected MeasuredRate NOT to be consulted when a caller rate is supplied")
+	}
+	if resolvedRate != 30 || rateSource != RateSourceCaller {
+		t.Fatalf("expected caller rate 30 to win, got resolvedRate=%v rateSource=%q", resolvedRate, rateSource)
+	}
+	if heads != 4 {
+		t.Fatalf("expected 4 heads, got %d", heads)
+	}
+}
+
+// TestProposePathPlan_MeasuredRateUnavailableFallsBackToZeroHeads covers
+// the fail-quiet contract: ErrMeasuredRateUnavailable (service down, no
+// TaskType mapping, no data yet) must never fail the request -- it falls
+// back to the existing zero-rate behaviour (0 heads), same as today with
+// no plannedRate at all.
+func TestProposePathPlan_MeasuredRateUnavailableFallsBackToZeroHeads(t *testing.T) {
+	f := newFixtures()
+	measured := &fakeMeasuredRateClient{err: ports.ErrMeasuredRateUnavailable}
+	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, MeasuredRate: measured}
+
+	heads, resolvedRate, rateSource, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
+	if err != nil {
+		t.Fatalf("expected no error (fail-quiet), got %v", err)
+	}
+	if heads != 0 {
+		t.Fatalf("expected 0 heads when no rate is available at all, got %d", heads)
+	}
+	if resolvedRate != 0 || rateSource != RateSourceCaller {
+		t.Fatalf("expected resolvedRate=0 rateSource=caller on fallback, got resolvedRate=%v rateSource=%q", resolvedRate, rateSource)
+	}
+}
+
+// TestProposePathPlan_NilMeasuredRateClientBehavesAsBeforeTheFeature
+// covers the composition-root safety net: a nil MeasuredRate (e.g. an
+// older wiring, or a test that doesn't care) must not panic, and must
+// behave exactly like the pre-feature zero-rate case.
+func TestProposePathPlan_NilMeasuredRateClientBehavesAsBeforeTheFeature(t *testing.T) {
+	f := newFixtures()
+	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock} // MeasuredRate left nil
+	heads, resolvedRate, rateSource, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if heads != 0 || resolvedRate != 0 || rateSource != RateSourceCaller {
+		t.Fatalf("expected zero-rate fallback, got heads=%d resolvedRate=%v rateSource=%q", heads, resolvedRate, rateSource)
+	}
+}
+
+// TestProposePathPlan_MeasuredRateClientNonSentinelErrorPropagates
+// covers the "programming error, not a business condition" branch: any
+// error OTHER than ErrMeasuredRateUnavailable from a MeasuredRateClient
+// must propagate as a hard failure, not be silently swallowed.
+func TestProposePathPlan_MeasuredRateClientNonSentinelErrorPropagates(t *testing.T) {
+	f := newFixtures()
+	measured := &fakeMeasuredRateClient{err: errBoom}
+	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, MeasuredRate: measured}
+
+	_, _, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom to propagate, got %v", err)
 	}
 }
 
@@ -503,7 +623,7 @@ func TestProposePathPlan_PublishError(t *testing.T) {
 	f := newFixtures()
 	pub := &failingPublisher{LogPublisher: f.pub, err: errBoom}
 	uc := &ProposePathPlan{Events: pub, Clock: f.clock}
-	_, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
+	_, _, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("expected errBoom, got %v", err)
 	}

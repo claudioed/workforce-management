@@ -125,6 +125,31 @@ func TestProposePathPlan(t *testing.T) {
 	if resp.ProposedHeads != 4 {
 		t.Fatalf("expected 4 proposed heads, got %d", resp.ProposedHeads)
 	}
+	if resp.RateSource != "caller" {
+		t.Fatalf("expected rateSource caller, got %q", resp.RateSource)
+	}
+	if resp.ResolvedRate != 30 {
+		t.Fatalf("expected resolvedRate 30, got %v", resp.ResolvedRate)
+	}
+}
+
+// TestProposePathPlan_OmittedRateFallsBackToZeroHeadsWithoutMeasuredRate
+// covers the wire-level contract when plannedRate is omitted and no
+// MeasuredRateClient is wired (newTestHandler leaves it nil): the request
+// must still succeed with 0 proposed heads, never a 4xx/5xx.
+func TestProposePathPlan_OmittedRateFallsBackToZeroHeadsWithoutMeasuredRate(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	rec := doRequest(t, router, http.MethodPost, "/paths/pack/plan/propose", proposePathPlanRequest{BuildingId: "bldg-1", Charge: 100})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp proposePathPlanResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ProposedHeads != 0 {
+		t.Fatalf("expected 0 proposed heads with no rate available, got %d", resp.ProposedHeads)
+	}
 }
 
 func TestCommitShiftPlan(t *testing.T) {

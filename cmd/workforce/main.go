@@ -19,6 +19,7 @@ import (
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/clock"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafka"
+	"github.com/claudioed/workforce-management/internal/adapters/outbound/laborperformance"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/postgres"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/workforce-management/internal/application/ports"
@@ -124,10 +125,12 @@ func run() error {
 	}
 	defer closePublisher()
 
+	measuredRate := buildMeasuredRateClient(envOrDefault("LABOR_PERFORMANCE_MODE", "permissive"), os.Getenv("LABOR_PERFORMANCE_BASE_URL"), logger)
+
 	handler := &inbound.Handler{
 		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: publisher, Clock: sysClock},
 		CertifyAssociate:    &usecases.CertifyAssociate{Associates: associates, Events: publisher, Clock: sysClock},
-		ProposePathPlan:     &usecases.ProposePathPlan{Events: publisher, Clock: sysClock},
+		ProposePathPlan:     &usecases.ProposePathPlan{Events: publisher, Clock: sysClock, MeasuredRate: measuredRate},
 		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift},
 		AssignLabor:         &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift},
 		StartBreak:          &usecases.StartBreak{Associates: associates, Events: publisher, Clock: sysClock},
@@ -209,6 +212,20 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// buildMeasuredRateClient selects a ports.MeasuredRateClient via mode
+// (http|permissive), defaulting to "permissive" so unit tests, local dev,
+// and CI never reach the network unless explicitly opted in -- the same
+// pattern order-management uses for INVENTORY_STORAGE_MODE.
+func buildMeasuredRateClient(mode, baseURL string, logger *slog.Logger) ports.MeasuredRateClient {
+	if mode != "http" {
+		logger.Info("labor-performance measured rate client configured", "mode", "permissive",
+			"hint", "set LABOR_PERFORMANCE_MODE=http and LABOR_PERFORMANCE_BASE_URL for a real deployment")
+		return laborperformance.NewPermissiveClient()
+	}
+	logger.Info("labor-performance measured rate client configured", "mode", "http", "base_url", baseURL)
+	return laborperformance.NewClient(baseURL, nil)
 }
 
 func envFloatOrDefault(key string, def float64) float64 {

@@ -208,6 +208,8 @@ paths:
               example:
                 pathId: pack
                 proposedHeads: 4
+                resolvedRate: 30
+                rateSource: caller
         "400":
           $ref: "#/components/responses/BadRequest"
         "500":
@@ -698,7 +700,7 @@ components:
 
     ProposePathPlanRequest:
       type: object
-      required: [buildingId, charge, plannedRate]
+      required: [buildingId, charge]
       properties:
         buildingId:
           type: string
@@ -712,20 +714,44 @@ components:
         plannedRate:
           type: number
           format: double
-          description: Planned units-per-head throughput rate for this path.
+          description: >-
+            Planned units-per-head throughput rate for this path. OPTIONAL:
+            omit (or send <= 0) to let the proposal fall back to a real
+            measured rate fed back from labor-performance for this path's
+            task type (feature: close-the-loop measured rate, ADR-0012).
+            A supplied plannedRate always wins outright over any measured
+            rate.
           example: 30
 
     ProposePathPlanResponse:
       type: object
-      required: [pathId, proposedHeads]
+      required: [pathId, proposedHeads, resolvedRate, rateSource]
       properties:
         pathId:
           type: string
           example: pack
         proposedHeads:
           type: integer
-          description: ceil(charge / plannedRate). Not committed.
+          description: ceil(charge / resolvedRate). Not committed.
           example: 4
+        resolvedRate:
+          type: number
+          format: double
+          description: >-
+            The rate actually used to compute proposedHeads -- either the
+            caller-supplied plannedRate, or a measured rate fed back from
+            labor-performance. 0 when neither was available (proposedHeads
+            is then also 0).
+          example: 30
+        rateSource:
+          type: string
+          enum: [caller, measured]
+          description: >-
+            Where resolvedRate came from: "caller" (a supplied plannedRate,
+            or no rate was available at all) or "measured" (fed back from
+            labor-performance). Lets a human see why proposedHeads came
+            back 0 (no rate from either source) rather than guessing.
+          example: caller
 
     PathPlanLineRequest:
       type: object

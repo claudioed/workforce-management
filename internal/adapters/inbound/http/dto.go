@@ -13,15 +13,24 @@ type certifyRequest struct {
 	Certification string `json:"certification"`
 }
 
+// proposePathPlanRequest's plannedRate is OPTIONAL: omit it (or send <= 0)
+// to let ProposePathPlan fall back to a measured rate fed back from
+// labor-performance when one is available for this path (ADR-0012).
 type proposePathPlanRequest struct {
 	BuildingId  string  `json:"buildingId"`
 	Charge      float64 `json:"charge"`
-	PlannedRate float64 `json:"plannedRate"`
+	PlannedRate float64 `json:"plannedRate,omitempty"`
 }
 
+// proposePathPlanResponse's RateSource is one of usecases.RateSourceCaller
+// or usecases.RateSourceMeasured, so a human can see WHERE the rate that
+// produced ProposedHeads came from -- and isn't left guessing why heads
+// came back 0 when no caller rate and no measured rate were available.
 type proposePathPlanResponse struct {
-	PathId        string `json:"pathId"`
-	ProposedHeads int    `json:"proposedHeads"`
+	PathId        string  `json:"pathId"`
+	ProposedHeads int     `json:"proposedHeads"`
+	ResolvedRate  float64 `json:"resolvedRate"`
+	RateSource    string  `json:"rateSource"`
 }
 
 type pathPlanLineRequest struct {
