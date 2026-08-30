@@ -59,3 +59,28 @@ so we surface that as a helm install-time error instead.
 {{- fail "workforce-management requires database.url or database.existingSecret to be set — this service has no in-memory fallback and will crash-loop without DATABASE_URL." -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Fully qualified name of the analytics projector deployment (ADR-0010).
+*/}}
+{{- define "workforce-management.projectorFullname" -}}
+{{- include "workforce-management.fullname" . }}-projector
+{{- end }}
+
+{{/*
+Fully qualified name of the analytics reports deployment/service (ADR-0010).
+*/}}
+{{- define "workforce-management.reportsFullname" -}}
+{{- include "workforce-management.fullname" . }}-reports
+{{- end }}
+
+{{/*
+Name of the Secret holding the analytics DSNs, when the chart creates its own.
+*/}}
+{{- define "workforce-management.analyticsSecretName" -}}
+{{- if .Values.analytics.database.existingSecret }}
+{{- .Values.analytics.database.existingSecret }}
+{{- else }}
+{{- include "workforce-management.fullname" . }}-analytics
+{{- end }}
+{{- end }}
