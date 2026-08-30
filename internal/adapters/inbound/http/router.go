@@ -159,12 +159,17 @@ func (h *Handler) proposePathPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	heads, err := h.ProposePathPlan.Execute(r.Context(), req.BuildingId, pathId, req.Charge, req.PlannedRate)
+	heads, resolvedRate, rateSource, err := h.ProposePathPlan.Execute(r.Context(), req.BuildingId, pathId, req.Charge, req.PlannedRate)
 	if err != nil {
 		writeError(w, r, statusFor(err), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, proposePathPlanResponse{PathId: string(pathId), ProposedHeads: heads})
+	writeJSON(w, http.StatusOK, proposePathPlanResponse{
+		PathId:        string(pathId),
+		ProposedHeads: heads,
+		ResolvedRate:  resolvedRate,
+		RateSource:    rateSource,
+	})
 }
 
 func (h *Handler) commitShiftPlan(w http.ResponseWriter, r *http.Request) {

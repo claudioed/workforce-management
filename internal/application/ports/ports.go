@@ -35,6 +35,30 @@ type AssignmentRepo interface {
 	CountActiveByPath(ctx context.Context, pathId shared.PathId) (int, error)
 }
 
+// MeasuredRateClient queries labor-performance for a real, measured mean
+// task duration for a path, so ProposePathPlan can propose headcount
+// against reality rather than requiring a caller-supplied plannedRate
+// every time. See ADR-000X in this repo's docs for the full "why a new
+// outbound Supplier, why fail-open" rationale.
+type MeasuredRateClient interface {
+	// MeanActualSeconds returns the real measured mean duration (seconds)
+	// labor-performance has recorded for pathId, or
+	// ErrMeasuredRateUnavailable on ANY failure to produce one --
+	// unreachable service, malformed response, or genuinely no data yet.
+	// ProposePathPlan treats every ErrMeasuredRateUnavailable case
+	// identically: fall back to the caller-supplied plannedRate. It never
+	// needs (and this interface deliberately never exposes) a way to tell
+	// those failure modes apart.
+	MeanActualSeconds(ctx context.Context, pathId shared.PathId) (float64, error)
+}
+
+// ErrMeasuredRateUnavailable is returned by a MeasuredRateClient
+// implementation for every failure mode a caller cannot usefully act on
+// differently: an unreachable labor-performance, a malformed response, or
+// a real 200 response reporting no measurable data yet for this path.
+// ProposePathPlan's single error-handling branch depends on this being
+// the ONLY error a MeasuredRateClient ever returns.
+
 // EventPublisher publishes domain events raised by aggregates.
 type EventPublisher interface {
 	Publish(ctx context.Context, events ...shared.DomainEvent) error
