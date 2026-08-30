@@ -208,6 +208,8 @@ paths:
               example:
                 pathId: pack
                 proposedHeads: 4
+                resolvedRate: 30
+                rateSource: caller
         "400":
           $ref: "#/components/responses/BadRequest"
         "500":
