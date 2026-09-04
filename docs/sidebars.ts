@@ -99,6 +99,7 @@ const sidebars: SidebarsConfig = {
         'adr/0010-analytical-data-product',
         'adr/0011-adopt-fleet-mfe-console-architecture',
         'adr/0012-measured-rate-feed-for-propose-path-plan',
+        'adr/0013-process-path-catalogue-validation',
       ],
     },
   ],

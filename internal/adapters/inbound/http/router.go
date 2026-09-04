@@ -15,6 +15,7 @@ import (
 	otelchimetric "github.com/riandyrn/otelchi/metric"
 
 	"github.com/claudioed/workforce-management/internal/application/usecases"
+	"github.com/claudioed/workforce-management/internal/domain/pathcatalog"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
 	"github.com/claudioed/workforce-management/internal/domain/shiftplan"
 )
@@ -34,6 +35,29 @@ type Handler struct {
 	EndBreak            *usecases.EndBreak
 	GetStaffingGap      *usecases.GetStaffingGap
 	EndAssociateShift   *usecases.EndAssociateShift
+
+	// Catalogue validates every caller-supplied path_id against the
+	// fleet's declared process-path catalogue before it is used to
+	// propose/commit a plan or assign labor — see
+	// fulfillment-execution's ADR-0017 and this service's own ADR-0013.
+	// A nil Catalogue (only ever the case in older tests not yet
+	// updated) skips validation rather than panicking, so this is
+	// additive, not a required wiring change for every caller.
+	Catalogue *pathcatalog.Catalogue
+}
+
+// validatePathId checks pathId against h.Catalogue when one is wired
+// in. Call this from every handler that accepts a caller-supplied
+// path_id for a WRITE (propose/commit a plan, assign labor) — the
+// read-only staffing-gap lookup also validates, since an unrecognized
+// path_id there is a genuinely different failure than "no plan exists
+// yet for this valid path."
+func (h *Handler) validatePathId(pathId shared.PathId) error {
+	if h.Catalogue == nil {
+		return nil
+	}
+	_, err := h.Catalogue.Lookup(string(pathId))
+	return err
 }
 
 // NewRouter builds the chi router for the Workforce Management REST API.
@@ -148,6 +172,10 @@ func (h *Handler) proposePathPlan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
+	if err := h.validatePathId(pathId); err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
 
 	var req proposePathPlanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -192,6 +220,10 @@ func (h *Handler) commitShiftPlan(w http.ResponseWriter, r *http.Request) {
 	for i, l := range req.Lines {
 		pathId, err := shared.NewPathId(l.PathId)
 		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err)
+			return
+		}
+		if err := h.validatePathId(pathId); err != nil {
 			writeError(w, r, http.StatusBadRequest, err)
 			return
 		}
@@ -244,6 +276,10 @@ func (h *Handler) assignLabor(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
+	if err := h.validatePathId(pathId); err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
 
 	la, err := h.AssignLabor.Execute(r.Context(), associateId, pathId)
 	if err != nil {
@@ -292,6 +328,10 @@ func (h *Handler) endBreak(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) staffingGap(w http.ResponseWriter, r *http.Request) {
 	pathId, err := shared.NewPathId(chi.URLParam(r, "pathId"))
 	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.validatePathId(pathId); err != nil {
 		writeError(w, r, http.StatusBadRequest, err)
 		return
 	}

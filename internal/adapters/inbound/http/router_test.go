@@ -13,6 +13,7 @@ import (
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/memory"
 	"github.com/claudioed/workforce-management/internal/application/usecases"
+	"github.com/claudioed/workforce-management/internal/domain/pathcatalog"
 )
 
 var testLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -20,6 +21,18 @@ var testLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 type fixedClock struct{ now time.Time }
 
 func (c *fixedClock) Now() time.Time { return c.now }
+
+// testCatalogue mirrors warehouse-infra's real sortable-fc.yaml declared
+// paths and fulfillment-execution's/wes-work-planning's own MatchPrefix
+// matching semantics — see fulfillment-execution's ADR-0017.
+func testCatalogue() *pathcatalog.Catalogue {
+	return pathcatalog.New([]pathcatalog.PathDefinition{
+		{Id: "PICK", MatchPrefix: "pick", RequiredCapabilities: []string{"pick"}},
+		{Id: "PACK", MatchPrefix: "pack", RequiredCapabilities: []string{"pack"}},
+		{Id: "REBIN", MatchPrefix: "rebin", RequiredCapabilities: []string{"rebin"}},
+		{Id: "SLAM", MatchPrefix: "slam", RequiredCapabilities: []string{"slam"}},
+	})
+}
 
 func newTestHandler() *Handler {
 	associates := memory.NewAssociateRepo()
@@ -39,6 +52,7 @@ func newTestHandler() *Handler {
 		EndBreak:            &usecases.EndBreak{Associates: associates, Events: pub, Clock: clock},
 		GetStaffingGap:      &usecases.GetStaffingGap{ShiftPlans: shiftPlans, Assignments: assignments, Events: pub, Clock: clock},
 		EndAssociateShift:   &usecases.EndAssociateShift{Associates: associates, Assignments: assignments, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
+		Catalogue:           testCatalogue(),
 	}
 }
 
@@ -133,6 +147,32 @@ func TestProposePathPlan(t *testing.T) {
 	}
 }
 
+// TestProposePathPlan_RejectsUnknownPathId is the core behavior change the
+// process-path catalogue introduces here: a caller-supplied path_id the
+// catalogue does not recognize is now rejected outright, rather than
+// silently accepted into a ChargeForecast/PathPlan nothing downstream will
+// ever route real work through. See fulfillment-execution's ADR-0017 and
+// this service's own ADR-0013.
+func TestProposePathPlan_RejectsUnknownPathId(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	rec := doRequest(t, router, http.MethodPost, "/paths/not-a-real-path/plan/propose", proposePathPlanRequest{BuildingId: "bldg-1", Charge: 100, PlannedRate: 30})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusBadRequest, "unknown-path-id", "/paths/not-a-real-path/plan/propose")
+}
+
+// TestProposePathPlan_ResolvesRealFleetPathIdVariant proves the catalogue's
+// MatchPrefix family matching (not an exact-match lookup) — the exact
+// regression class fulfillment-execution's ADR-0017 addendum documents.
+func TestProposePathPlan_ResolvesRealFleetPathIdVariant(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	rec := doRequest(t, router, http.MethodPost, "/paths/pick-zone-a/plan/propose", proposePathPlanRequest{BuildingId: "bldg-1", Charge: 100, PlannedRate: 30})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestProposePathPlan_OmittedRateFallsBackToZeroHeadsWithoutMeasuredRate
 // covers the wire-level contract when plannedRate is omitted and no
 // MeasuredRateClient is wired (newTestHandler leaves it nil): the request
@@ -207,6 +247,27 @@ func TestCommitShiftPlan_RejectsMissingBuildingId(t *testing.T) {
 	assertProblemDetails(t, rec, http.StatusBadRequest, "missing-building-id", "/shift-plans")
 }
 
+// TestCommitShiftPlan_RejectsUnknownPathId proves the same catalogue
+// validation contract on the multi-line commit path: a single line
+// referencing an unrecognized path_id fails the whole request, mirroring
+// the fail-loud contract fulfillment-execution's WorkReleased consumer
+// (ADR-0017) already has for the same category of gap.
+func TestCommitShiftPlan_RejectsUnknownPathId(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	req := commitShiftPlanRequest{
+		BuildingId: "bldg-1",
+		ShiftId:    "shift-1",
+		Lines: []pathPlanLineRequest{
+			{PathId: "not-a-real-path", PlannedHeads: 5, PlannedRate: 30, PlannedHours: 40, InstalledStations: 10},
+		},
+	}
+	rec := doRequest(t, router, http.MethodPost, "/shift-plans", req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusBadRequest, "unknown-path-id", "/shift-plans")
+}
+
 func TestAssignLabor(t *testing.T) {
 	router := NewRouter(newTestHandler(), testLogger, "")
 	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{Certifications: []string{"pack"}})
@@ -226,7 +287,7 @@ func TestAssignLabor_RejectsMissingCertification(t *testing.T) {
 	router := NewRouter(newTestHandler(), testLogger, "")
 	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{})
 
-	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/assignments", assignLaborRequest{PathId: "hazmat"})
+	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/assignments", assignLaborRequest{PathId: "pick"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -244,6 +305,21 @@ func TestAssignLabor_RejectsWhileOnBreak(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
+}
+
+// TestAssignLabor_RejectsUnknownPathId proves the catalogue validation
+// contract on the assignment path too: an unrecognized path_id is
+// rejected before ever reaching the AssignLabor use case's own
+// certification/break/shift-state gates.
+func TestAssignLabor_RejectsUnknownPathId(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{Certifications: []string{"pack"}})
+
+	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/assignments", assignLaborRequest{PathId: "not-a-real-path"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusBadRequest, "unknown-path-id", "/associates/assoc-1/assignments")
 }
 
 func TestStartAndEndBreak(t *testing.T) {
@@ -283,6 +359,20 @@ func TestStaffingGap(t *testing.T) {
 	if !resp.Understaffed || resp.PlannedHeads != 3 {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
+}
+
+// TestStaffingGap_RejectsUnknownPathId proves the catalogue validation
+// contract extends to the read-only staffing-gap lookup too: an
+// unrecognized path_id is a genuinely different failure than "no plan
+// exists yet for this valid path" (ports.ErrNotFound), so it is
+// rejected before the use case ever runs.
+func TestStaffingGap_RejectsUnknownPathId(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	rec := doRequest(t, router, http.MethodGet, "/paths/not-a-real-path/staffing-gap?buildingId=bldg-1&shiftId=shift-1", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusBadRequest, "unknown-path-id", "/paths/not-a-real-path/staffing-gap")
 }
 
 func TestEndShift(t *testing.T) {
