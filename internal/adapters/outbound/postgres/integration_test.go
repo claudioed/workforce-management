@@ -123,7 +123,7 @@ func TestShiftPlanRepo_SaveAndFind(t *testing.T) {
 
 	lines := []shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 5, PlannedRate: 30, PlannedHours: 40}}
 	installed := map[shared.PathId]int{"pack": 10}
-	sp, err := shiftplan.CommitShiftPlan("bldg-1", "shift-1", lines, installed, 8, time.Now())
+	sp, err := shiftplan.CommitShiftPlan("bldg-1", "shift-1", lines, installed, installed, 8, time.Now())
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestShiftPlanRepo_Save_UpdatesExistingPlanLines(t *testing.T) {
 
 	lines := []shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 5, PlannedRate: 30, PlannedHours: 40}}
 	installed := map[shared.PathId]int{"pack": 10}
-	sp, err := shiftplan.CommitShiftPlan("bldg-1", "shift-1", lines, installed, 8, time.Now())
+	sp, err := shiftplan.CommitShiftPlan("bldg-1", "shift-1", lines, installed, installed, 8, time.Now())
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestShiftPlanRepo_Save_UpdatesExistingPlanLines(t *testing.T) {
 		{PathId: "stow", PlannedHeads: 2, PlannedRate: 25, PlannedHours: 16},
 	}
 	installed2 := map[shared.PathId]int{"pack": 10, "stow": 10}
-	sp2, err := shiftplan.CommitShiftPlan("bldg-1", "shift-1", updatedLines, installed2, 8, time.Now())
+	sp2, err := shiftplan.CommitShiftPlan("bldg-1", "shift-1", updatedLines, installed2, installed2, 8, time.Now())
 	if err != nil {
 		t.Fatalf("commit (update): %v", err)
 	}

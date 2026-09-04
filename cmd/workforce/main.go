@@ -19,6 +19,7 @@ import (
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/clock"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/filecatalog"
+	"github.com/claudioed/workforce-management/internal/adapters/outbound/fulfillmentexecution"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/laborperformance"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/postgres"
@@ -138,12 +139,13 @@ func run() error {
 	defer closePublisher()
 
 	measuredRate := buildMeasuredRateClient(envOrDefault("LABOR_PERFORMANCE_MODE", "permissive"), os.Getenv("LABOR_PERFORMANCE_BASE_URL"), logger)
+	installedCapacity := buildInstalledCapacityClient(envOrDefault("INSTALLED_CAPACITY_MODE", "permissive"), os.Getenv("FULFILLMENT_EXECUTION_BASE_URL"), logger)
 
 	handler := &inbound.Handler{
 		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: publisher, Clock: sysClock},
 		CertifyAssociate:    &usecases.CertifyAssociate{Associates: associates, Events: publisher, Clock: sysClock},
 		ProposePathPlan:     &usecases.ProposePathPlan{Events: publisher, Clock: sysClock, MeasuredRate: measuredRate},
-		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift},
+		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: publisher, Clock: sysClock, InstalledCapacity: installedCapacity, MaxHoursPerShift: maxHoursPerShift},
 		AssignLabor:         &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift},
 		StartBreak:          &usecases.StartBreak{Associates: associates, Events: publisher, Clock: sysClock},
 		EndBreak:            &usecases.EndBreak{Associates: associates, Events: publisher, Clock: sysClock},
@@ -239,6 +241,23 @@ func buildMeasuredRateClient(mode, baseURL string, logger *slog.Logger) ports.Me
 	}
 	logger.Info("labor-performance measured rate client configured", "mode", "http", "base_url", baseURL)
 	return laborperformance.NewClient(baseURL, nil)
+}
+
+// buildInstalledCapacityClient selects a ports.InstalledCapacityClient via
+// mode (http|permissive), defaulting to "permissive" -- unlike
+// buildMeasuredRateClient's fail-open default, the permissive mode here
+// makes CommitShiftPlan fail EVERY commit until INSTALLED_CAPACITY_MODE=http
+// is explicitly set, since a shift-plan commit mutates real state and
+// this fleet's own rule is to fail loud for anything that mutates real
+// state. See ADR-0014.
+func buildInstalledCapacityClient(mode, baseURL string, logger *slog.Logger) ports.InstalledCapacityClient {
+	if mode != "http" {
+		logger.Warn("fulfillment-execution installed capacity client configured", "mode", "permissive",
+			"hint", "every ShiftPlan commit will fail until INSTALLED_CAPACITY_MODE=http and FULFILLMENT_EXECUTION_BASE_URL are set for a real deployment")
+		return fulfillmentexecution.NewPermissiveClient()
+	}
+	logger.Info("fulfillment-execution installed capacity client configured", "mode", "http", "base_url", baseURL)
+	return fulfillmentexecution.NewClient(baseURL, nil)
 }
 
 func envFloatOrDefault(key string, def float64) float64 {

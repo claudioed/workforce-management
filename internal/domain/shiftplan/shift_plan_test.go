@@ -27,7 +27,7 @@ func TestCommitShiftPlan_Succeeds(t *testing.T) {
 	}
 	installed := map[shared.PathId]int{"pack": 10}
 
-	sp, err := CommitShiftPlan("building-1", "shift-1", lines, installed, 8, now)
+	sp, err := CommitShiftPlan("building-1", "shift-1", lines, installed, installed, 8, now)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestCommitShiftPlan_RejectsPlannedHeadsExceedingInstalledStations(t *testin
 	}
 	installed := map[shared.PathId]int{"pack": 10}
 
-	_, err := CommitShiftPlan("building-1", "shift-1", lines, installed, 8, now)
+	_, err := CommitShiftPlan("building-1", "shift-1", lines, installed, installed, 8, now)
 	if err != ErrPlannedHeadsExceedInstalled {
 		t.Fatalf("expected ErrPlannedHeadsExceedInstalled, got %v", err)
 	}
@@ -66,7 +66,7 @@ func TestCommitShiftPlan_AllowsPlannedHeadsExactlyEqualToInstalledStations(t *te
 	}
 	installed := map[shared.PathId]int{"pack": 10}
 
-	sp, err := CommitShiftPlan("building-1", "shift-1", lines, installed, 8, now)
+	sp, err := CommitShiftPlan("building-1", "shift-1", lines, installed, installed, 8, now)
 	if err != nil {
 		t.Fatalf("expected plannedHeads == installedStations to be accepted, got error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestCommitShiftPlan_RejectsPlannedHoursExceedingCapacity(t *testing.T) {
 	}
 	installed := map[shared.PathId]int{"pack": 10}
 
-	_, err := CommitShiftPlan("building-1", "shift-1", lines, installed, 8, now)
+	_, err := CommitShiftPlan("building-1", "shift-1", lines, installed, installed, 8, now)
 	if err != ErrPlannedHoursExceedCapacity {
 		t.Fatalf("expected ErrPlannedHoursExceedCapacity, got %v", err)
 	}
@@ -95,15 +95,79 @@ func TestCommitShiftPlan_RejectsMissingInstalledStations(t *testing.T) {
 	}
 	installed := map[shared.PathId]int{"pack": 10}
 
-	_, err := CommitShiftPlan("building-1", "shift-1", lines, installed, 8, now)
+	_, err := CommitShiftPlan("building-1", "shift-1", lines, installed, installed, 8, now)
 	if err != ErrMissingInstalledStations {
 		t.Fatalf("expected ErrMissingInstalledStations, got %v", err)
 	}
 }
 
+// TestCommitShiftPlan_RejectsPlanExceedingInstalledCapacity is a
+// Definition-of-Done named failing-path test for Feature C: a live,
+// fulfillment-execution-sourced installed-capacity ceiling is a SECOND,
+// independent check alongside the existing caller-supplied
+// installedStations check -- both must pass. This is the exact
+// regression this ceiling exists to prevent: a caller could supply
+// installedStations=15 in good faith while fulfillment-execution's
+// REAL Station registry only has 10 stations physically registered for
+// that capability.
+func TestCommitShiftPlan_RejectsPlanExceedingInstalledCapacity(t *testing.T) {
+	now := time.Now()
+	lines := []PathPlan{
+		{PathId: "pack", PlannedHeads: 15, PlannedRate: 30, PlannedHours: 200},
+	}
+	installedStations := map[shared.PathId]int{"pack": 20} // caller-supplied check passes
+	installedCapacity := map[shared.PathId]int{"pack": 10} // live check fails
+
+	_, err := CommitShiftPlan("building-1", "shift-1", lines, installedStations, installedCapacity, 8, now)
+	if err != ErrExceedsInstalledCapacity {
+		t.Fatalf("expected ErrExceedsInstalledCapacity, got %v", err)
+	}
+}
+
+// TestCommitShiftPlan_AllowsPlannedHeadsExactlyEqualToInstalledCapacity is
+// a boundary test on the SAME invariant.
+func TestCommitShiftPlan_AllowsPlannedHeadsExactlyEqualToInstalledCapacity(t *testing.T) {
+	now := time.Now()
+	lines := []PathPlan{
+		{PathId: "pack", PlannedHeads: 10, PlannedRate: 30, PlannedHours: 80},
+	}
+	installedStations := map[shared.PathId]int{"pack": 10}
+	installedCapacity := map[shared.PathId]int{"pack": 10}
+
+	sp, err := CommitShiftPlan("building-1", "shift-1", lines, installedStations, installedCapacity, 8, now)
+	if err != nil {
+		t.Fatalf("expected plannedHeads == installedCapacity to be accepted, got error: %v", err)
+	}
+	if sp.PlannedHeadsFor("pack") != 10 {
+		t.Fatalf("expected 10 planned heads, got %d", sp.PlannedHeadsFor("pack"))
+	}
+}
+
+// TestCommitShiftPlan_MissingInstalledCapacityEntryDefaultsToZeroCeiling
+// proves the fail-safe default: a path with NO entry in installedCapacity
+// is treated as a live-fetched ceiling of 0 (not "no ceiling"/skip), so
+// any positive plannedHeads for it is rejected. In production this
+// entry is always populated by CommitShiftPlan's own use case (which
+// fails the whole commit loud if it cannot fetch a real value for
+// EVERY line first) -- this test documents the safe default if that
+// invariant is ever violated.
+func TestCommitShiftPlan_MissingInstalledCapacityEntryDefaultsToZeroCeiling(t *testing.T) {
+	now := time.Now()
+	lines := []PathPlan{
+		{PathId: "pack", PlannedHeads: 1, PlannedRate: 30, PlannedHours: 8},
+	}
+	installedStations := map[shared.PathId]int{"pack": 10}
+	installedCapacity := map[shared.PathId]int{} // no entry for "pack"
+
+	_, err := CommitShiftPlan("building-1", "shift-1", lines, installedStations, installedCapacity, 8, now)
+	if err != ErrExceedsInstalledCapacity {
+		t.Fatalf("expected ErrExceedsInstalledCapacity, got %v", err)
+	}
+}
+
 func TestCommitShiftPlan_RejectsEmptyLines(t *testing.T) {
 	now := time.Now()
-	_, err := CommitShiftPlan("building-1", "shift-1", nil, map[shared.PathId]int{}, 8, now)
+	_, err := CommitShiftPlan("building-1", "shift-1", nil, map[shared.PathId]int{}, map[shared.PathId]int{}, 8, now)
 	if err != ErrNoPathPlans {
 		t.Fatalf("expected ErrNoPathPlans, got %v", err)
 	}
@@ -152,7 +216,7 @@ func TestLines_ReturnsCopy(t *testing.T) {
 	}
 	installed := map[shared.PathId]int{"pack": 10, "stow": 10}
 
-	sp, err := CommitShiftPlan("building-1", "shift-1", lines, installed, 8, now)
+	sp, err := CommitShiftPlan("building-1", "shift-1", lines, installed, installed, 8, now)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -191,7 +255,7 @@ func TestPlannedHeadsFor_ReturnsZeroForUnknownPath(t *testing.T) {
 	}
 	installed := map[shared.PathId]int{"pack": 10}
 
-	sp, err := CommitShiftPlan("building-1", "shift-1", lines, installed, 8, now)
+	sp, err := CommitShiftPlan("building-1", "shift-1", lines, installed, installed, 8, now)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -2,9 +2,11 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,8 +14,10 @@ import (
 
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/memory"
+	"github.com/claudioed/workforce-management/internal/application/ports"
 	"github.com/claudioed/workforce-management/internal/application/usecases"
 	"github.com/claudioed/workforce-management/internal/domain/pathcatalog"
+	"github.com/claudioed/workforce-management/internal/domain/shared"
 )
 
 var testLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -34,6 +38,27 @@ func testCatalogue() *pathcatalog.Catalogue {
 	})
 }
 
+// fakeInstalledCapacityClient is a test double for
+// ports.InstalledCapacityClient. A nil capacityByPath (the zero value)
+// means "always return unlimited" -- so tests focused on the
+// caller-supplied installedStations check don't need to separately
+// script the live-capacity fetch. Tests that DO care about the live
+// ceiling set capacityByPath explicitly.
+type fakeInstalledCapacityClient struct {
+	capacityByPath map[shared.PathId]int
+	err            error
+}
+
+func (f *fakeInstalledCapacityClient) InstalledCapacity(_ context.Context, pathId shared.PathId) (int, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	if f.capacityByPath == nil {
+		return math.MaxInt32, nil
+	}
+	return f.capacityByPath[pathId], nil
+}
+
 func newTestHandler() *Handler {
 	associates := memory.NewAssociateRepo()
 	shiftPlans := memory.NewShiftPlanRepo()
@@ -46,7 +71,7 @@ func newTestHandler() *Handler {
 		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: pub, Clock: clock},
 		CertifyAssociate:    &usecases.CertifyAssociate{Associates: associates, Events: pub, Clock: clock},
 		ProposePathPlan:     &usecases.ProposePathPlan{Events: pub, Clock: clock},
-		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
+		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: pub, Clock: clock, InstalledCapacity: &fakeInstalledCapacityClient{}, MaxHoursPerShift: maxHoursPerShift},
 		AssignLabor:         &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
 		StartBreak:          &usecases.StartBreak{Associates: associates, Events: pub, Clock: clock},
 		EndBreak:            &usecases.EndBreak{Associates: associates, Events: pub, Clock: clock},
@@ -226,6 +251,53 @@ func TestCommitShiftPlan_RejectsPlannedHeadsExceedingInstalledStations(t *testin
 		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
 	assertProblemDetails(t, rec, http.StatusConflict, "planned-heads-exceed-installed", "/shift-plans")
+}
+
+// TestCommitShiftPlan_RejectsPlanExceedingLiveInstalledCapacity is a
+// Definition-of-Done named failing-path test for Feature C at the HTTP
+// layer: even when the caller-supplied installedStations check passes,
+// a live fulfillment-execution capacity below plannedHeads is a
+// separate 409.
+func TestCommitShiftPlan_RejectsPlanExceedingLiveInstalledCapacity(t *testing.T) {
+	handler := newTestHandler()
+	handler.CommitShiftPlan.InstalledCapacity = &fakeInstalledCapacityClient{capacityByPath: map[shared.PathId]int{"pack": 3}}
+	router := NewRouter(handler, testLogger, "")
+
+	req := commitShiftPlanRequest{
+		BuildingId: "bldg-1",
+		ShiftId:    "shift-1",
+		Lines: []pathPlanLineRequest{
+			{PathId: "pack", PlannedHeads: 5, PlannedRate: 30, PlannedHours: 40, InstalledStations: 10},
+		},
+	}
+	rec := doRequest(t, router, http.MethodPost, "/shift-plans", req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusConflict, "exceeds-installed-capacity", "/shift-plans")
+}
+
+// TestCommitShiftPlan_ServiceUnavailableWhenInstalledCapacityUnreachable
+// proves the fail-loud policy surfaces as 503, not 500 or 409: a
+// dependency-reachability failure is distinct from both a client
+// validation error and a genuine bug in this service. See ADR-0014.
+func TestCommitShiftPlan_ServiceUnavailableWhenInstalledCapacityUnreachable(t *testing.T) {
+	handler := newTestHandler()
+	handler.CommitShiftPlan.InstalledCapacity = &fakeInstalledCapacityClient{err: ports.ErrInstalledCapacityUnavailable}
+	router := NewRouter(handler, testLogger, "")
+
+	req := commitShiftPlanRequest{
+		BuildingId: "bldg-1",
+		ShiftId:    "shift-1",
+		Lines: []pathPlanLineRequest{
+			{PathId: "pack", PlannedHeads: 5, PlannedRate: 30, PlannedHours: 40, InstalledStations: 10},
+		},
+	}
+	rec := doRequest(t, router, http.MethodPost, "/shift-plans", req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusServiceUnavailable, "installed-capacity-unavailable", "/shift-plans")
 }
 
 // TestCommitShiftPlan_RejectsMissingBuildingId is an HTTP-layer validation
