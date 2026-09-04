@@ -18,6 +18,7 @@ import (
 	inbound "github.com/claudioed/workforce-management/internal/adapters/inbound/http"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/clock"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
+	"github.com/claudioed/workforce-management/internal/adapters/outbound/filecatalog"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/laborperformance"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/postgres"
@@ -104,6 +105,17 @@ func run() error {
 	migrationsPath := envOrDefault("MIGRATIONS_PATH", "migrations")
 	maxHoursPerShift := envFloatOrDefault("MAX_HOURS_PER_SHIFT", 8.0)
 
+	// The process-path catalogue is loaded and validated once at boot,
+	// before anything else stands up — a missing or malformed catalogue
+	// file must stop this service from starting at all, never fall back
+	// to a partial/empty catalogue (mirrors fulfillment-execution's and
+	// wes-work-planning's identical boot-time contract; see ADR-0013).
+	catalogue, err := filecatalog.Load(envOrDefault("PATH_CATALOGUE_FILE", "/etc/workforce-management/process-paths.yaml"))
+	if err != nil {
+		return fmt.Errorf("failed to load the process-path catalogue: %w", err)
+	}
+	logger.Info("process-path catalogue loaded", "paths", catalogue.Ids())
+
 	if err := postgres.Migrate(databaseURL, migrationsPath); err != nil {
 		return err
 	}
@@ -137,6 +149,7 @@ func run() error {
 		EndBreak:            &usecases.EndBreak{Associates: associates, Events: publisher, Clock: sysClock},
 		GetStaffingGap:      &usecases.GetStaffingGap{ShiftPlans: shiftPlans, Assignments: assignments, Events: publisher, Clock: sysClock},
 		EndAssociateShift:   &usecases.EndAssociateShift{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift},
+		Catalogue:           catalogue,
 	}
 
 	server := &http.Server{

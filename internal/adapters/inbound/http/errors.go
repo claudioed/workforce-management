@@ -7,6 +7,7 @@ import (
 	"github.com/claudioed/workforce-management/internal/application/ports"
 	"github.com/claudioed/workforce-management/internal/domain/assignment"
 	"github.com/claudioed/workforce-management/internal/domain/associate"
+	"github.com/claudioed/workforce-management/internal/domain/pathcatalog"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
 	"github.com/claudioed/workforce-management/internal/domain/shiftplan"
 )
@@ -33,6 +34,7 @@ func statusFor(err error) int {
 	case errors.Is(err, shared.ErrEmptyAssociateId),
 		errors.Is(err, shared.ErrEmptyPathId),
 		errors.Is(err, shared.ErrEmptyCertification),
+		errors.Is(err, pathcatalog.ErrUnknownPath),
 		errors.Is(err, shiftplan.ErrNoPathPlans),
 		errors.Is(err, shiftplan.ErrMissingInstalledStations):
 		return http.StatusBadRequest
@@ -73,6 +75,8 @@ func categoryFor(status int, err error) problemCategory {
 		return problemCategory{"empty-associate-id", "Associate id must not be empty"}
 	case errors.Is(err, shared.ErrEmptyPathId):
 		return problemCategory{"empty-path-id", "Path id must not be empty"}
+	case errors.Is(err, pathcatalog.ErrUnknownPath):
+		return problemCategory{"unknown-path-id", "Unrecognized process-path id"}
 	case errors.Is(err, shared.ErrEmptyCertification):
 		return problemCategory{"empty-certification", "Certification must not be empty"}
 	case errors.Is(err, shiftplan.ErrNoPathPlans):

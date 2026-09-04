@@ -124,6 +124,7 @@ Env vars:
 | `KAFKA_BROKERS` | no | `localhost:9092` | comma-separated broker list, used when `EVENT_PUBLISHER=kafka` |
 | `LABOR_PERFORMANCE_MODE` | no | `permissive` | `http` or `permissive` — selects the `ProposePathPlan` measured-rate feed from labor-performance (ADR-0012); `permissive` never reaches the network |
 | `LABOR_PERFORMANCE_BASE_URL` | when `LABOR_PERFORMANCE_MODE=http` | — | labor-performance's base URL |
+| `PATH_CATALOGUE_FILE` | no | `/etc/workforce-management/process-paths.yaml` | Path to the declared process-path catalogue YAML (see `warehouse-infra`'s `config/process-paths/sortable-fc.yaml`, the same file `fulfillment-execution` and `wes-work-planning` read). Loaded once at startup; a missing or invalid file is a fatal boot-time error — see [ADR-0013](docs/docs/adr/0013-process-path-catalogue-validation.md) |
 | `LOG_LEVEL` | no | `info` | `debug`\|`info`\|`warn`\|`error` (case-insensitive) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | `localhost:4317` | OTel Collector gRPC endpoint — see [Observability](#observability) |
 | `OTEL_SERVICE_NAME` | no | `workforce-management` | `service.name` resource attribute |
