@@ -2,6 +2,7 @@ package mcp_test
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -27,6 +28,16 @@ var base = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 type fixedClock struct{ now time.Time }
 
 func (c fixedClock) Now() time.Time { return c.now }
+
+// unlimitedInstalledCapacity is a test double for
+// ports.InstalledCapacityClient that always reports capacity as
+// effectively unlimited, so tests focused on other behavior don't need
+// to separately script the live-capacity fetch Feature C introduced.
+type unlimitedInstalledCapacity struct{}
+
+func (unlimitedInstalledCapacity) InstalledCapacity(_ context.Context, _ shared.PathId) (int, error) {
+	return math.MaxInt32, nil
+}
 
 // bearerTransport adds a fixed Authorization header to every request, so the
 // in-process MCP client authenticates like a real one.
@@ -55,7 +66,7 @@ func newServer(t *testing.T) string {
 	const maxHours = 10.0
 	ctx := context.Background()
 
-	commit := &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: publisher, Clock: clk, MaxHoursPerShift: maxHours}
+	commit := &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: publisher, Clock: clk, InstalledCapacity: unlimitedInstalledCapacity{}, MaxHoursPerShift: maxHours}
 	if _, err := commit.Execute(ctx, "B1", "S1",
 		[]shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 3, PlannedRate: 10, PlannedHours: 0}},
 		map[shared.PathId]int{"pack": 20},

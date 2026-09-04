@@ -39,7 +39,7 @@ func newTestPublisher(t *testing.T, sp *shiftplan.ShiftPlan) (*Publisher, *fakeW
 
 func mustCommitPlan(t *testing.T, lines []shiftplan.PathPlan, installed map[shared.PathId]int) *shiftplan.ShiftPlan {
 	t.Helper()
-	sp, err := shiftplan.CommitShiftPlan("BLD1", "SHIFT1", lines, installed, 8.0, time.Date(2026, 8, 21, 22, 0, 0, 0, time.UTC))
+	sp, err := shiftplan.CommitShiftPlan("BLD1", "SHIFT1", lines, installed, installed, 8.0, time.Date(2026, 8, 21, 22, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("commit shift plan: %v", err)
 	}

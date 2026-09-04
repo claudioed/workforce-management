@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/memory"
 	"github.com/claudioed/workforce-management/internal/application/usecases"
+	"github.com/claudioed/workforce-management/internal/domain/shared"
 )
 
 // maxHoursPerShift mirrors the limit the HTTP adapter's own tests use, so
@@ -41,6 +43,21 @@ type fixedClock struct{ now time.Time }
 
 func (c *fixedClock) Now() time.Time { return c.now }
 
+// unlimitedInstalledCapacity is a test double for
+// ports.InstalledCapacityClient that always reports capacity as
+// effectively unlimited. The BDD scenarios under features/ exercise the
+// caller-supplied installedStations invariant (this context's own
+// long-standing check); the LIVE fulfillment-execution-sourced ceiling
+// Feature C added is covered at the application layer instead (see
+// internal/application/usecases/usecases_test.go), so this suite treats
+// it as always-satisfied rather than re-deriving fulfillment-execution
+// fixtures here.
+type unlimitedInstalledCapacity struct{}
+
+func (unlimitedInstalledCapacity) InstalledCapacity(_ context.Context, _ shared.PathId) (int, error) {
+	return math.MaxInt32, nil
+}
+
 // newServer builds a fully wired composition of the service backed by
 // in-memory adapters and serves it over HTTP. Each scenario gets its own,
 // so no state leaks between scenarios.
@@ -55,7 +72,7 @@ func newServer() *httptest.Server {
 		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: pub, Clock: clock},
 		CertifyAssociate:    &usecases.CertifyAssociate{Associates: associates, Events: pub, Clock: clock},
 		ProposePathPlan:     &usecases.ProposePathPlan{Events: pub, Clock: clock},
-		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
+		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: pub, Clock: clock, InstalledCapacity: unlimitedInstalledCapacity{}, MaxHoursPerShift: maxHoursPerShift},
 		AssignLabor:         &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
 		StartBreak:          &usecases.StartBreak{Associates: associates, Events: pub, Clock: clock},
 		EndBreak:            &usecases.EndBreak{Associates: associates, Events: pub, Clock: clock},
