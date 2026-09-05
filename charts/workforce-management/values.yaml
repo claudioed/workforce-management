@@ -97,6 +97,24 @@ logLevel: "info"
 
 extraEnv: []
 
+# ---------------------------------------------------------------------------
+# Process-path catalogue (ADR-0013 here / ADR-0017 in fulfillment-execution):
+# a boot-time-required file this binary reads via PATH_CATALOGUE_FILE.
+# warehouse-infra owns the canonical content (config/process-paths/*.yaml is
+# the fleet's published-language source of truth, shared verbatim with
+# fulfillment-execution and wes-work-planning) -- this chart just knows how
+# to mount whatever content it's given.
+# ---------------------------------------------------------------------------
+pathCatalogue:
+  enabled: true
+  mountPath: "/etc/workforce-management"
+  # Raw YAML content of the catalogue file (e.g. via --set-file or a
+  # values.yaml `content: |` block). Ignored when existingConfigMap is set.
+  content: ""
+  # Name of a pre-existing ConfigMap with a "process-paths.yaml" data key.
+  # When set, content above is ignored and no ConfigMap is created here.
+  existingConfigMap: ""
+
 livenessProbe:
   httpGet:
     path: /healthz
