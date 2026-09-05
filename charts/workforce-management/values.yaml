@@ -46,6 +46,23 @@ ingress:
           pathType: Prefix
   tls: []
 
+# Gateway API HTTPRoute: an additive, disabled-by-default alternative to the
+# Ingress above. warehouse-infra's Kong Ingress Controller routes HTTPRoute
+# traffic once its GatewayClass carries the konghq.com/gatewayclass-unmanaged
+# annotation (verified live in the fulfillment-execution pilot). Flipping a
+# service from Ingress to HTTPRoute is then just enabling this block and
+# disabling ingress.enabled above — both can also coexist during migration.
+gatewayApi:
+  enabled: false
+  parentRefs:
+    - name: ""
+      namespace: ""
+      sectionName: "http"
+  hosts:
+    - path: /
+      pathType: PathPrefix
+  stripPath: true
+
 resources:
   limits:
     cpu: 500m
