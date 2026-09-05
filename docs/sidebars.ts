@@ -101,6 +101,7 @@ const sidebars: SidebarsConfig = {
         'adr/0012-measured-rate-feed-for-propose-path-plan',
         'adr/0013-process-path-catalogue-validation',
         'adr/0014-installed-capacity-ceiling',
+        'adr/0015-standard-metrics-convention',
       ],
     },
   ],

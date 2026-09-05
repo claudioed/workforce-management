@@ -94,3 +94,4 @@ quietly delete the old one — the fact that it was tried is itself information.
 | [0012](./0012-measured-rate-feed-for-propose-path-plan.md) | Close-the-loop measured rate feed from labor-performance into ProposePathPlan | Accepted |
 | [0013](./0013-process-path-catalogue-validation.md) | Process-path catalogue validation, mirroring fulfillment-execution's ADR-0017 | Accepted |
 | [0014](./0014-installed-capacity-ceiling.md) | Live installed-capacity ceiling on Comm...[truncated]
+| [0015](./0015-standard-metrics-convention.md) | Standard metrics convention across the fleet | Accepted |
