@@ -2,9 +2,11 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,7 +14,10 @@ import (
 
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/memory"
+	"github.com/claudioed/workforce-management/internal/application/ports"
 	"github.com/claudioed/workforce-management/internal/application/usecases"
+	"github.com/claudioed/workforce-management/internal/domain/pathcatalog"
+	"github.com/claudioed/workforce-management/internal/domain/shared"
 )
 
 var testLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -20,6 +25,39 @@ var testLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 type fixedClock struct{ now time.Time }
 
 func (c *fixedClock) Now() time.Time { return c.now }
+
+// testCatalogue mirrors warehouse-infra's real sortable-fc.yaml declared
+// paths and fulfillment-execution's/wes-work-planning's own MatchPrefix
+// matching semantics — see fulfillment-execution's ADR-0017.
+func testCatalogue() *pathcatalog.Catalogue {
+	return pathcatalog.New([]pathcatalog.PathDefinition{
+		{Id: "PICK", MatchPrefix: "pick", RequiredCapabilities: []string{"pick"}},
+		{Id: "PACK", MatchPrefix: "pack", RequiredCapabilities: []string{"pack"}},
+		{Id: "REBIN", MatchPrefix: "rebin", RequiredCapabilities: []string{"rebin"}},
+		{Id: "SLAM", MatchPrefix: "slam", RequiredCapabilities: []string{"slam"}},
+	})
+}
+
+// fakeInstalledCapacityClient is a test double for
+// ports.InstalledCapacityClient. A nil capacityByPath (the zero value)
+// means "always return unlimited" -- so tests focused on the
+// caller-supplied installedStations check don't need to separately
+// script the live-capacity fetch. Tests that DO care about the live
+// ceiling set capacityByPath explicitly.
+type fakeInstalledCapacityClient struct {
+	capacityByPath map[shared.PathId]int
+	err            error
+}
+
+func (f *fakeInstalledCapacityClient) InstalledCapacity(_ context.Context, pathId shared.PathId) (int, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	if f.capacityByPath == nil {
+		return math.MaxInt32, nil
+	}
+	return f.capacityByPath[pathId], nil
+}
 
 func newTestHandler() *Handler {
 	associates := memory.NewAssociateRepo()
@@ -33,12 +71,13 @@ func newTestHandler() *Handler {
 		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: pub, Clock: clock},
 		CertifyAssociate:    &usecases.CertifyAssociate{Associates: associates, Events: pub, Clock: clock},
 		ProposePathPlan:     &usecases.ProposePathPlan{Events: pub, Clock: clock},
-		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
+		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: pub, Clock: clock, InstalledCapacity: &fakeInstalledCapacityClient{}, MaxHoursPerShift: maxHoursPerShift},
 		AssignLabor:         &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
 		StartBreak:          &usecases.StartBreak{Associates: associates, Events: pub, Clock: clock},
 		EndBreak:            &usecases.EndBreak{Associates: associates, Events: pub, Clock: clock},
 		GetStaffingGap:      &usecases.GetStaffingGap{ShiftPlans: shiftPlans, Assignments: assignments, Events: pub, Clock: clock},
 		EndAssociateShift:   &usecases.EndAssociateShift{Associates: associates, Assignments: assignments, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
+		Catalogue:           testCatalogue(),
 	}
 }
 
@@ -125,6 +164,57 @@ func TestProposePathPlan(t *testing.T) {
 	if resp.ProposedHeads != 4 {
 		t.Fatalf("expected 4 proposed heads, got %d", resp.ProposedHeads)
 	}
+	if resp.RateSource != "caller" {
+		t.Fatalf("expected rateSource caller, got %q", resp.RateSource)
+	}
+	if resp.ResolvedRate != 30 {
+		t.Fatalf("expected resolvedRate 30, got %v", resp.ResolvedRate)
+	}
+}
+
+// TestProposePathPlan_RejectsUnknownPathId is the core behavior change the
+// process-path catalogue introduces here: a caller-supplied path_id the
+// catalogue does not recognize is now rejected outright, rather than
+// silently accepted into a ChargeForecast/PathPlan nothing downstream will
+// ever route real work through. See fulfillment-execution's ADR-0017 and
+// this service's own ADR-0013.
+func TestProposePathPlan_RejectsUnknownPathId(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	rec := doRequest(t, router, http.MethodPost, "/paths/not-a-real-path/plan/propose", proposePathPlanRequest{BuildingId: "bldg-1", Charge: 100, PlannedRate: 30})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusBadRequest, "unknown-path-id", "/paths/not-a-real-path/plan/propose")
+}
+
+// TestProposePathPlan_ResolvesRealFleetPathIdVariant proves the catalogue's
+// MatchPrefix family matching (not an exact-match lookup) — the exact
+// regression class fulfillment-execution's ADR-0017 addendum documents.
+func TestProposePathPlan_ResolvesRealFleetPathIdVariant(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	rec := doRequest(t, router, http.MethodPost, "/paths/pick-zone-a/plan/propose", proposePathPlanRequest{BuildingId: "bldg-1", Charge: 100, PlannedRate: 30})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestProposePathPlan_OmittedRateFallsBackToZeroHeadsWithoutMeasuredRate
+// covers the wire-level contract when plannedRate is omitted and no
+// MeasuredRateClient is wired (newTestHandler leaves it nil): the request
+// must still succeed with 0 proposed heads, never a 4xx/5xx.
+func TestProposePathPlan_OmittedRateFallsBackToZeroHeadsWithoutMeasuredRate(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	rec := doRequest(t, router, http.MethodPost, "/paths/pack/plan/propose", proposePathPlanRequest{BuildingId: "bldg-1", Charge: 100})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp proposePathPlanResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ProposedHeads != 0 {
+		t.Fatalf("expected 0 proposed heads with no rate available, got %d", resp.ProposedHeads)
+	}
 }
 
 func TestCommitShiftPlan(t *testing.T) {
@@ -163,6 +253,53 @@ func TestCommitShiftPlan_RejectsPlannedHeadsExceedingInstalledStations(t *testin
 	assertProblemDetails(t, rec, http.StatusConflict, "planned-heads-exceed-installed", "/shift-plans")
 }
 
+// TestCommitShiftPlan_RejectsPlanExceedingLiveInstalledCapacity is a
+// Definition-of-Done named failing-path test for Feature C at the HTTP
+// layer: even when the caller-supplied installedStations check passes,
+// a live fulfillment-execution capacity below plannedHeads is a
+// separate 409.
+func TestCommitShiftPlan_RejectsPlanExceedingLiveInstalledCapacity(t *testing.T) {
+	handler := newTestHandler()
+	handler.CommitShiftPlan.InstalledCapacity = &fakeInstalledCapacityClient{capacityByPath: map[shared.PathId]int{"pack": 3}}
+	router := NewRouter(handler, testLogger, "")
+
+	req := commitShiftPlanRequest{
+		BuildingId: "bldg-1",
+		ShiftId:    "shift-1",
+		Lines: []pathPlanLineRequest{
+			{PathId: "pack", PlannedHeads: 5, PlannedRate: 30, PlannedHours: 40, InstalledStations: 10},
+		},
+	}
+	rec := doRequest(t, router, http.MethodPost, "/shift-plans", req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusConflict, "exceeds-installed-capacity", "/shift-plans")
+}
+
+// TestCommitShiftPlan_ServiceUnavailableWhenInstalledCapacityUnreachable
+// proves the fail-loud policy surfaces as 503, not 500 or 409: a
+// dependency-reachability failure is distinct from both a client
+// validation error and a genuine bug in this service. See ADR-0014.
+func TestCommitShiftPlan_ServiceUnavailableWhenInstalledCapacityUnreachable(t *testing.T) {
+	handler := newTestHandler()
+	handler.CommitShiftPlan.InstalledCapacity = &fakeInstalledCapacityClient{err: ports.ErrInstalledCapacityUnavailable}
+	router := NewRouter(handler, testLogger, "")
+
+	req := commitShiftPlanRequest{
+		BuildingId: "bldg-1",
+		ShiftId:    "shift-1",
+		Lines: []pathPlanLineRequest{
+			{PathId: "pack", PlannedHeads: 5, PlannedRate: 30, PlannedHours: 40, InstalledStations: 10},
+		},
+	}
+	rec := doRequest(t, router, http.MethodPost, "/shift-plans", req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusServiceUnavailable, "installed-capacity-unavailable", "/shift-plans")
+}
+
 // TestCommitShiftPlan_RejectsMissingBuildingId is an HTTP-layer validation
 // test: buildingId/shiftId have no domain value object (ShiftPlan stores
 // them as plain strings), so the adapter itself must reject an empty
@@ -180,6 +317,27 @@ func TestCommitShiftPlan_RejectsMissingBuildingId(t *testing.T) {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 	assertProblemDetails(t, rec, http.StatusBadRequest, "missing-building-id", "/shift-plans")
+}
+
+// TestCommitShiftPlan_RejectsUnknownPathId proves the same catalogue
+// validation contract on the multi-line commit path: a single line
+// referencing an unrecognized path_id fails the whole request, mirroring
+// the fail-loud contract fulfillment-execution's WorkReleased consumer
+// (ADR-0017) already has for the same category of gap.
+func TestCommitShiftPlan_RejectsUnknownPathId(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	req := commitShiftPlanRequest{
+		BuildingId: "bldg-1",
+		ShiftId:    "shift-1",
+		Lines: []pathPlanLineRequest{
+			{PathId: "not-a-real-path", PlannedHeads: 5, PlannedRate: 30, PlannedHours: 40, InstalledStations: 10},
+		},
+	}
+	rec := doRequest(t, router, http.MethodPost, "/shift-plans", req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusBadRequest, "unknown-path-id", "/shift-plans")
 }
 
 func TestAssignLabor(t *testing.T) {
@@ -201,7 +359,7 @@ func TestAssignLabor_RejectsMissingCertification(t *testing.T) {
 	router := NewRouter(newTestHandler(), testLogger, "")
 	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{})
 
-	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/assignments", assignLaborRequest{PathId: "hazmat"})
+	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/assignments", assignLaborRequest{PathId: "pick"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -219,6 +377,21 @@ func TestAssignLabor_RejectsWhileOnBreak(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
+}
+
+// TestAssignLabor_RejectsUnknownPathId proves the catalogue validation
+// contract on the assignment path too: an unrecognized path_id is
+// rejected before ever reaching the AssignLabor use case's own
+// certification/break/shift-state gates.
+func TestAssignLabor_RejectsUnknownPathId(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{Certifications: []string{"pack"}})
+
+	rec := doRequest(t, router, http.MethodPost, "/associates/assoc-1/assignments", assignLaborRequest{PathId: "not-a-real-path"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusBadRequest, "unknown-path-id", "/associates/assoc-1/assignments")
 }
 
 func TestStartAndEndBreak(t *testing.T) {
@@ -258,6 +431,20 @@ func TestStaffingGap(t *testing.T) {
 	if !resp.Understaffed || resp.PlannedHeads != 3 {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
+}
+
+// TestStaffingGap_RejectsUnknownPathId proves the catalogue validation
+// contract extends to the read-only staffing-gap lookup too: an
+// unrecognized path_id is a genuinely different failure than "no plan
+// exists yet for this valid path" (ports.ErrNotFound), so it is
+// rejected before the use case ever runs.
+func TestStaffingGap_RejectsUnknownPathId(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	rec := doRequest(t, router, http.MethodGet, "/paths/not-a-real-path/staffing-gap?buildingId=bldg-1&shiftId=shift-1", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertProblemDetails(t, rec, http.StatusBadRequest, "unknown-path-id", "/paths/not-a-real-path/staffing-gap")
 }
 
 func TestEndShift(t *testing.T) {

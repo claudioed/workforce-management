@@ -5,13 +5,17 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	"github.com/riandyrn/otelchi"
 	otelchimetric "github.com/riandyrn/otelchi/metric"
 
 	"github.com/claudioed/workforce-management/internal/application/usecases"
+	"github.com/claudioed/workforce-management/internal/domain/pathcatalog"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
 	"github.com/claudioed/workforce-management/internal/domain/shiftplan"
 )
@@ -31,6 +35,29 @@ type Handler struct {
 	EndBreak            *usecases.EndBreak
 	GetStaffingGap      *usecases.GetStaffingGap
 	EndAssociateShift   *usecases.EndAssociateShift
+
+	// Catalogue validates every caller-supplied path_id against the
+	// fleet's declared process-path catalogue before it is used to
+	// propose/commit a plan or assign labor — see
+	// fulfillment-execution's ADR-0017 and this service's own ADR-0013.
+	// A nil Catalogue (only ever the case in older tests not yet
+	// updated) skips validation rather than panicking, so this is
+	// additive, not a required wiring change for every caller.
+	Catalogue *pathcatalog.Catalogue
+}
+
+// validatePathId checks pathId against h.Catalogue when one is wired
+// in. Call this from every handler that accepts a caller-supplied
+// path_id for a WRITE (propose/commit a plan, assign labor) — the
+// read-only staffing-gap lookup also validates, since an unrecognized
+// path_id there is a genuinely different failure than "no plan exists
+// yet for this valid path."
+func (h *Handler) validatePathId(pathId shared.PathId) error {
+	if h.Catalogue == nil {
+		return nil
+	}
+	_, err := h.Catalogue.Lookup(string(pathId))
+	return err
 }
 
 // NewRouter builds the chi router for the Workforce Management REST API.
@@ -58,6 +85,7 @@ func NewRouter(h *Handler, logger *slog.Logger, serviceName string) http.Handler
 	))
 	r.Use(RequestLogger(logger))
 	r.Use(middleware.Recoverer)
+	r.Use(corsMiddleware())
 
 	r.Get("/healthz", h.healthz)
 
@@ -144,6 +172,10 @@ func (h *Handler) proposePathPlan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
+	if err := h.validatePathId(pathId); err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
 
 	var req proposePathPlanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -155,12 +187,17 @@ func (h *Handler) proposePathPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	heads, err := h.ProposePathPlan.Execute(r.Context(), req.BuildingId, pathId, req.Charge, req.PlannedRate)
+	heads, resolvedRate, rateSource, err := h.ProposePathPlan.Execute(r.Context(), req.BuildingId, pathId, req.Charge, req.PlannedRate)
 	if err != nil {
 		writeError(w, r, statusFor(err), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, proposePathPlanResponse{PathId: string(pathId), ProposedHeads: heads})
+	writeJSON(w, http.StatusOK, proposePathPlanResponse{
+		PathId:        string(pathId),
+		ProposedHeads: heads,
+		ResolvedRate:  resolvedRate,
+		RateSource:    rateSource,
+	})
 }
 
 func (h *Handler) commitShiftPlan(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +220,10 @@ func (h *Handler) commitShiftPlan(w http.ResponseWriter, r *http.Request) {
 	for i, l := range req.Lines {
 		pathId, err := shared.NewPathId(l.PathId)
 		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err)
+			return
+		}
+		if err := h.validatePathId(pathId); err != nil {
 			writeError(w, r, http.StatusBadRequest, err)
 			return
 		}
@@ -232,6 +273,10 @@ func (h *Handler) assignLabor(w http.ResponseWriter, r *http.Request) {
 	}
 	pathId, err := shared.NewPathId(req.PathId)
 	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.validatePathId(pathId); err != nil {
 		writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
@@ -286,6 +331,10 @@ func (h *Handler) staffingGap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, err)
 		return
 	}
+	if err := h.validatePathId(pathId); err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
 	buildingId := r.URL.Query().Get("buildingId")
 	if buildingId == "" {
 		writeError(w, r, http.StatusBadRequest, errMissingBuildingId)
@@ -316,6 +365,25 @@ func (h *Handler) endShift(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// corsMiddleware allows the warehouse-console browser SPA (and this
+// service's own future MFE remote dev origin) to call this API directly
+// from the browser. Static-bearer-key auth, not cookies, so credentials
+// are never needed here. CORS_ALLOWED_ORIGINS overrides the local-dev
+// default (comma-separated) for staging/prod deployments.
+func corsMiddleware() func(http.Handler) http.Handler {
+	origins := []string{"http://localhost:5173", "http://localhost:5185"}
+	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
+		origins = strings.Split(v, ",")
+	}
+	return cors.Handler(cors.Options{
+		AllowedOrigins:   origins,
+		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete},
+		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

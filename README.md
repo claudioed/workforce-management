@@ -122,6 +122,11 @@ Env vars:
 | `MAX_HOURS_PER_SHIFT` | no | `8` | the configured max-hours-per-shift cap |
 | `EVENT_PUBLISHER` | no | `log` | `log` or `kafka` — see [Integration](#integration) |
 | `KAFKA_BROKERS` | no | `localhost:9092` | comma-separated broker list, used when `EVENT_PUBLISHER=kafka` |
+| `LABOR_PERFORMANCE_MODE` | no | `permissive` | `http` or `permissive` — selects the `ProposePathPlan` measured-rate feed from labor-performance (ADR-0012); `permissive` never reaches the network |
+| `LABOR_PERFORMANCE_BASE_URL` | when `LABOR_PERFORMANCE_MODE=http` | — | labor-performance's base URL |
+| `INSTALLED_CAPACITY_MODE` | no | `permissive` | `http` or `permissive` — selects the `CommitShiftPlan` live installed-capacity ceiling client from fulfillment-execution (ADR-0014). Unlike `LABOR_PERFORMANCE_MODE`'s fail-open `permissive` default, this one is fail-LOUD: every `CommitShiftPlan` call is rejected until `http` mode is set, since a shift-plan commit mutates real state |
+| `FULFILLMENT_EXECUTION_BASE_URL` | when `INSTALLED_CAPACITY_MODE=http` | — | fulfillment-execution's base URL |
+| `PATH_CATALOGUE_FILE` | no | `/etc/workforce-management/process-paths.yaml` | Path to the declared process-path catalogue YAML (see `warehouse-infra`'s `config/process-paths/sortable-fc.yaml`, the same file `fulfillment-execution` and `wes-work-planning` read). Loaded once at startup; a missing or invalid file is a fatal boot-time error — see [ADR-0013](docs/docs/adr/0013-process-path-catalogue-validation.md) |
 | `LOG_LEVEL` | no | `info` | `debug`\|`info`\|`warn`\|`error` (case-insensitive) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | `localhost:4317` | OTel Collector gRPC endpoint — see [Observability](#observability) |
 | `OTEL_SERVICE_NAME` | no | `workforce-management` | `service.name` resource attribute |
@@ -190,9 +195,20 @@ curl -X POST localhost:8080/associates/assoc-1/start-shift \
 curl -X POST localhost:8080/associates/assoc-1/certifications \
   -d '{"certification":"hazmat"}'
 
-# Propose heads for a path (pure computation, ceil(charge/plannedRate); not committed)
+# Propose heads for a path (pure computation, ceil(charge/resolvedRate); not committed).
+# plannedRate is OPTIONAL: omit it (or send <= 0) to fall back to a real
+# measured rate fed back from labor-performance for pick/pack/slam paths
+# (feature: close-the-loop measured rate, ADR-0012). Response includes
+# resolvedRate + rateSource ("caller" or "measured") so it's always clear
+# where the number came from.
 curl -X POST localhost:8080/paths/pack/plan/propose \
   -d '{"buildingId":"bldg-1","charge":100,"plannedRate":30}'
+# -> {"pathId":"pack","proposedHeads":4,"resolvedRate":30,"rateSource":"caller"}
+
+curl -X POST localhost:8080/paths/pack/plan/propose \
+  -d '{"buildingId":"bldg-1","charge":100}'
+# -> falls back to labor-performance's measured rate for PACK when
+#    LABOR_PERFORMANCE_MODE=http and data exists; otherwise 0 proposed heads.
 
 # Commit a shift plan (human-committed headcount split across paths)
 curl -X POST localhost:8080/shift-plans \

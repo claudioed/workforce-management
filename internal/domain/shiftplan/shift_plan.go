@@ -26,6 +26,16 @@ var ErrPlannedHoursExceedCapacity = errors.New("planned hours exceed capacity fo
 // path with no known installed-station count.
 var ErrMissingInstalledStations = errors.New("missing installed station count for path")
 
+// ErrExceedsInstalledCapacity is returned when a PathPlan's plannedHeads
+// exceeds the path's LIVE installed capacity, as sourced from
+// fulfillment-execution's real Station registry at commit time. This is
+// deliberately a SEPARATE, independent check from
+// ErrPlannedHeadsExceedInstalled: the latter validates against a
+// caller-supplied installedStations number (which this context has no
+// way to verify on its own), while this one validates against a live
+// fetch of physical reality. See ADR-0014.
+var ErrExceedsInstalledCapacity = errors.New("planned heads exceed the live installed capacity reported by fulfillment-execution")
+
 // PathPlan is one line of a ShiftPlan: the committed headcount, rate, and
 // hours for a single path.
 type PathPlan struct {
@@ -57,9 +67,14 @@ func ProposedHeads(charge float64, plannedRate float64) int {
 
 // CommitShiftPlan validates and constructs a committed ShiftPlan, raising
 // ShiftPlanCommitted. installedStations must contain an entry for every path
-// referenced by lines. maxHoursPerShift bounds each line's plannedHours to
-// what its planned heads can work in one shift.
-func CommitShiftPlan(buildingId, shiftId string, lines []PathPlan, installedStations map[shared.PathId]int, maxHoursPerShift float64, at time.Time) (*ShiftPlan, error) {
+// referenced by lines (a caller-supplied, structural check).
+// installedCapacity is the LIVE, fulfillment-execution-sourced ceiling for
+// each path (Feature C) -- a SEPARATE, independent check: a missing entry
+// is treated as a live capacity of 0, never skipped, so a caller cannot
+// bypass this check simply by omitting a path. maxHoursPerShift bounds
+// each line's plannedHours to what its planned heads can work in one
+// shift.
+func CommitShiftPlan(buildingId, shiftId string, lines []PathPlan, installedStations map[shared.PathId]int, installedCapacity map[shared.PathId]int, maxHoursPerShift float64, at time.Time) (*ShiftPlan, error) {
 	if len(lines) == 0 {
 		return nil, ErrNoPathPlans
 	}
@@ -70,6 +85,13 @@ func CommitShiftPlan(buildingId, shiftId string, lines []PathPlan, installedStat
 		}
 		if line.PlannedHeads > installed {
 			return nil, ErrPlannedHeadsExceedInstalled
+		}
+		// installedCapacity[line.PathId] defaults to the zero value (0)
+		// for a path with no entry -- deliberately a ceiling of 0, not
+		// "skip this check" -- so a missing live-capacity fetch can
+		// never silently bypass Feature C's invariant.
+		if line.PlannedHeads > installedCapacity[line.PathId] {
+			return nil, ErrExceedsInstalledCapacity
 		}
 		if line.PlannedHours > float64(line.PlannedHeads)*maxHoursPerShift {
 			return nil, ErrPlannedHoursExceedCapacity

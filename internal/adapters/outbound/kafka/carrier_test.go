@@ -99,6 +99,7 @@ func TestPublishInjectsTraceContextIntoEveryMessage(t *testing.T) {
 		{PathId: "pick", PlannedHeads: 2, PlannedRate: 40, PlannedHours: 16},
 	}
 	sp, err := shiftplan.CommitShiftPlan("BLD1", "SHIFT1", lines,
+		map[shared.PathId]int{"pack": 5, "pick": 5},
 		map[shared.PathId]int{"pack": 5, "pick": 5}, 8.0,
 		time.Date(2026, 8, 21, 22, 0, 0, 0, time.UTC))
 	if err != nil {

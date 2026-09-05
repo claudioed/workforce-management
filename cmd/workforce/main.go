@@ -18,7 +18,10 @@ import (
 	inbound "github.com/claudioed/workforce-management/internal/adapters/inbound/http"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/clock"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
+	"github.com/claudioed/workforce-management/internal/adapters/outbound/filecatalog"
+	"github.com/claudioed/workforce-management/internal/adapters/outbound/fulfillmentexecution"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafka"
+	"github.com/claudioed/workforce-management/internal/adapters/outbound/laborperformance"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/postgres"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/workforce-management/internal/application/ports"
@@ -103,6 +106,17 @@ func run() error {
 	migrationsPath := envOrDefault("MIGRATIONS_PATH", "migrations")
 	maxHoursPerShift := envFloatOrDefault("MAX_HOURS_PER_SHIFT", 8.0)
 
+	// The process-path catalogue is loaded and validated once at boot,
+	// before anything else stands up — a missing or malformed catalogue
+	// file must stop this service from starting at all, never fall back
+	// to a partial/empty catalogue (mirrors fulfillment-execution's and
+	// wes-work-planning's identical boot-time contract; see ADR-0013).
+	catalogue, err := filecatalog.Load(envOrDefault("PATH_CATALOGUE_FILE", "/etc/workforce-management/process-paths.yaml"))
+	if err != nil {
+		return fmt.Errorf("failed to load the process-path catalogue: %w", err)
+	}
+	logger.Info("process-path catalogue loaded", "paths", catalogue.Ids())
+
 	if err := postgres.Migrate(databaseURL, migrationsPath); err != nil {
 		return err
 	}
@@ -124,16 +138,20 @@ func run() error {
 	}
 	defer closePublisher()
 
+	measuredRate := buildMeasuredRateClient(envOrDefault("LABOR_PERFORMANCE_MODE", "permissive"), os.Getenv("LABOR_PERFORMANCE_BASE_URL"), logger)
+	installedCapacity := buildInstalledCapacityClient(envOrDefault("INSTALLED_CAPACITY_MODE", "permissive"), os.Getenv("FULFILLMENT_EXECUTION_BASE_URL"), logger)
+
 	handler := &inbound.Handler{
 		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: publisher, Clock: sysClock},
 		CertifyAssociate:    &usecases.CertifyAssociate{Associates: associates, Events: publisher, Clock: sysClock},
-		ProposePathPlan:     &usecases.ProposePathPlan{Events: publisher, Clock: sysClock},
-		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift},
+		ProposePathPlan:     &usecases.ProposePathPlan{Events: publisher, Clock: sysClock, MeasuredRate: measuredRate},
+		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: publisher, Clock: sysClock, InstalledCapacity: installedCapacity, MaxHoursPerShift: maxHoursPerShift},
 		AssignLabor:         &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift},
 		StartBreak:          &usecases.StartBreak{Associates: associates, Events: publisher, Clock: sysClock},
 		EndBreak:            &usecases.EndBreak{Associates: associates, Events: publisher, Clock: sysClock},
 		GetStaffingGap:      &usecases.GetStaffingGap{ShiftPlans: shiftPlans, Assignments: assignments, Events: publisher, Clock: sysClock},
 		EndAssociateShift:   &usecases.EndAssociateShift{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift},
+		Catalogue:           catalogue,
 	}
 
 	server := &http.Server{
@@ -209,6 +227,37 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// buildMeasuredRateClient selects a ports.MeasuredRateClient via mode
+// (http|permissive), defaulting to "permissive" so unit tests, local dev,
+// and CI never reach the network unless explicitly opted in -- the same
+// pattern order-management uses for INVENTORY_STORAGE_MODE.
+func buildMeasuredRateClient(mode, baseURL string, logger *slog.Logger) ports.MeasuredRateClient {
+	if mode != "http" {
+		logger.Info("labor-performance measured rate client configured", "mode", "permissive",
+			"hint", "set LABOR_PERFORMANCE_MODE=http and LABOR_PERFORMANCE_BASE_URL for a real deployment")
+		return laborperformance.NewPermissiveClient()
+	}
+	logger.Info("labor-performance measured rate client configured", "mode", "http", "base_url", baseURL)
+	return laborperformance.NewClient(baseURL, nil)
+}
+
+// buildInstalledCapacityClient selects a ports.InstalledCapacityClient via
+// mode (http|permissive), defaulting to "permissive" -- unlike
+// buildMeasuredRateClient's fail-open default, the permissive mode here
+// makes CommitShiftPlan fail EVERY commit until INSTALLED_CAPACITY_MODE=http
+// is explicitly set, since a shift-plan commit mutates real state and
+// this fleet's own rule is to fail loud for anything that mutates real
+// state. See ADR-0014.
+func buildInstalledCapacityClient(mode, baseURL string, logger *slog.Logger) ports.InstalledCapacityClient {
+	if mode != "http" {
+		logger.Warn("fulfillment-execution installed capacity client configured", "mode", "permissive",
+			"hint", "every ShiftPlan commit will fail until INSTALLED_CAPACITY_MODE=http and FULFILLMENT_EXECUTION_BASE_URL are set for a real deployment")
+		return fulfillmentexecution.NewPermissiveClient()
+	}
+	logger.Info("fulfillment-execution installed capacity client configured", "mode", "http", "base_url", baseURL)
+	return fulfillmentexecution.NewClient(baseURL, nil)
 }
 
 func envFloatOrDefault(key string, def float64) float64 {

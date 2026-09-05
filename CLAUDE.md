@@ -139,6 +139,25 @@ PathUnderstaffed, AssociateShiftEnded.
 
 JSON DTOs live in the http adapter; never leak domain structs directly.
 
+CORS middleware (`go-chi/cors`) is enabled on every route, allowing
+`CORS_ALLOWED_ORIGINS` (env, default `http://localhost:5173,http://localhost:5185`
+— the `warehouse-console` shell and this service's own `workforce-mfe`
+remote). This service is not part of the fleet's cross-service Order
+Lifecycle read model (see ADR-0002 in `warehouse-ops-agent`'s docs) — no
+order-lifecycle stage touches workforce/staffing state — CORS here exists
+solely for this service's own `workforce-mfe` screen below.
+
+## Frontend micro-frontend remote (`web/`)
+
+This repo also owns `web/`: `workforce-mfe`, a Vite + React Module
+Federation **remote** consumed by the separate `warehouse-console` shell
+repo. It is a plain browser client of this service's own REST API above
+(staffing-gap-by-path dashboard) — nothing in `web/` talks to any other
+bounded context, and nothing in `internal/` knows `web/` exists. `web/`
+has its own `package.json`, build, and dev server (`:5185`); it does not
+participate in this repo's Go quality gate and is not part of the Go
+module.
+
 ## Tech & standards
 
 - Go 1.26, modules. Module path: `github.com/claudioed/workforce-management`.

@@ -7,6 +7,7 @@ import (
 	"github.com/claudioed/workforce-management/internal/application/ports"
 	"github.com/claudioed/workforce-management/internal/domain/assignment"
 	"github.com/claudioed/workforce-management/internal/domain/associate"
+	"github.com/claudioed/workforce-management/internal/domain/pathcatalog"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
 	"github.com/claudioed/workforce-management/internal/domain/shiftplan"
 )
@@ -33,6 +34,7 @@ func statusFor(err error) int {
 	case errors.Is(err, shared.ErrEmptyAssociateId),
 		errors.Is(err, shared.ErrEmptyPathId),
 		errors.Is(err, shared.ErrEmptyCertification),
+		errors.Is(err, pathcatalog.ErrUnknownPath),
 		errors.Is(err, shiftplan.ErrNoPathPlans),
 		errors.Is(err, shiftplan.ErrMissingInstalledStations):
 		return http.StatusBadRequest
@@ -43,8 +45,17 @@ func statusFor(err error) int {
 		errors.Is(err, associate.ErrMaxHoursExceeded),
 		errors.Is(err, assignment.ErrCertificationRequired),
 		errors.Is(err, shiftplan.ErrPlannedHeadsExceedInstalled),
+		errors.Is(err, shiftplan.ErrExceedsInstalledCapacity),
 		errors.Is(err, shiftplan.ErrPlannedHoursExceedCapacity):
 		return http.StatusConflict
+	case errors.Is(err, ports.ErrInstalledCapacityUnavailable):
+		// A dependency-reachability failure, not a client validation
+		// error: the request itself was well-formed, but this service
+		// could not verify it against fulfillment-execution's real
+		// Station registry. 503, not 409/500 -- signals "retry later",
+		// distinct from both a request-shape problem and a genuine bug
+		// in this service. See ADR-0014.
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}
@@ -73,6 +84,8 @@ func categoryFor(status int, err error) problemCategory {
 		return problemCategory{"empty-associate-id", "Associate id must not be empty"}
 	case errors.Is(err, shared.ErrEmptyPathId):
 		return problemCategory{"empty-path-id", "Path id must not be empty"}
+	case errors.Is(err, pathcatalog.ErrUnknownPath):
+		return problemCategory{"unknown-path-id", "Unrecognized process-path id"}
 	case errors.Is(err, shared.ErrEmptyCertification):
 		return problemCategory{"empty-certification", "Certification must not be empty"}
 	case errors.Is(err, shiftplan.ErrNoPathPlans):
@@ -97,8 +110,12 @@ func categoryFor(status int, err error) problemCategory {
 		return problemCategory{"certification-required", "Associate lacks the certification required for this path"}
 	case errors.Is(err, shiftplan.ErrPlannedHeadsExceedInstalled):
 		return problemCategory{"planned-heads-exceed-installed", "Planned heads exceed installed stations for path"}
+	case errors.Is(err, shiftplan.ErrExceedsInstalledCapacity):
+		return problemCategory{"exceeds-installed-capacity", "Planned heads exceed the live installed capacity reported by fulfillment-execution"}
 	case errors.Is(err, shiftplan.ErrPlannedHoursExceedCapacity):
 		return problemCategory{"planned-hours-exceed-capacity", "Planned hours exceed capacity for planned heads within max hours per shift"}
+	case errors.Is(err, ports.ErrInstalledCapacityUnavailable):
+		return problemCategory{"installed-capacity-unavailable", "Could not verify installed capacity against fulfillment-execution"}
 	case status == http.StatusBadRequest:
 		return problemCategory{"malformed-request-body", "Malformed request body"}
 	default:

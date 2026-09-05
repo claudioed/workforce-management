@@ -4,11 +4,22 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
+
+// sanitizeForLog strips CR/LF from an attacker-controlled value (here,
+// the raw request path) before it is written to a log line. Without this,
+// a crafted path segment containing an encoded newline could forge a fake
+// log entry that appears to be a separate, legitimate line (CWE-117 log
+// injection) once the log record reaches a downstream viewer/aggregator
+// that doesn't preserve slog's JSON string escaping.
+func sanitizeForLog(s string) string {
+	return strings.NewReplacer("\n", "", "\r", "").Replace(s)
+}
 
 // RequestLogger returns chi middleware that logs each request's method,
 // route, status, duration, and response size via logger. Requests that
@@ -31,7 +42,7 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			ctx := r.Context()
 			attrs := []any{
 				"method", r.Method,
-				"path", r.URL.Path,
+				"path", sanitizeForLog(r.URL.Path),
 				"route", routePattern(ctx),
 				"status", ww.Status(),
 				"duration_ms", duration.Milliseconds(),

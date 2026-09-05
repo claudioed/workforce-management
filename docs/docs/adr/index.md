@@ -90,3 +90,7 @@ quietly delete the old one — the fact that it was tried is itself information.
 | [0008](./0008-mcp-inbound-adapter.md) | Model Context Protocol as an inbound adapter, not a new service | Accepted |
 | [0009](./0009-hazmat-certification-via-existing-path-gating.md) | Hazmat handling via the existing path-name-equals-certification-name gate | Accepted |
 | [0010](./0010-analytical-data-product.md) | Per-service analytical data product (report) via a separate analytics topic | Accepted |
+| [0011](./0011-adopt-fleet-mfe-console-architecture.md) | Adopt the fleet-wide micro-frontend console architecture (workforce-mfe) | Accepted |
+| [0012](./0012-measured-rate-feed-for-propose-path-plan.md) | Close-the-loop measured rate feed from labor-performance into ProposePathPlan | Accepted |
+| [0013](./0013-process-path-catalogue-validation.md) | Process-path catalogue validation, mirroring fulfillment-execution's ADR-0017 | Accepted |
+| [0014](./0014-installed-capacity-ceiling.md) | Live installed-capacity ceiling on Comm...[truncated]

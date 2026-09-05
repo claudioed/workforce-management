@@ -6,6 +6,7 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/claudioed/workforce-management/internal/domain/assignment"
@@ -34,6 +35,63 @@ type AssignmentRepo interface {
 	FindByAssociateID(ctx context.Context, id shared.AssociateId) (*assignment.LaborAssignment, error)
 	CountActiveByPath(ctx context.Context, pathId shared.PathId) (int, error)
 }
+
+// MeasuredRateClient queries labor-performance for a real, measured mean
+// task duration for a path, so ProposePathPlan can propose headcount
+// against reality rather than requiring a caller-supplied plannedRate
+// every time. See ADR-000X in this repo's docs for the full "why a new
+// outbound Supplier, why fail-open" rationale.
+type MeasuredRateClient interface {
+	// MeanActualSeconds returns the real measured mean duration (seconds)
+	// labor-performance has recorded for pathId, or
+	// ErrMeasuredRateUnavailable on ANY failure to produce one --
+	// unreachable service, malformed response, or genuinely no data yet.
+	// ProposePathPlan treats every ErrMeasuredRateUnavailable case
+	// identically: fall back to the caller-supplied plannedRate. It never
+	// needs (and this interface deliberately never exposes) a way to tell
+	// those failure modes apart.
+	MeanActualSeconds(ctx context.Context, pathId shared.PathId) (float64, error)
+}
+
+// ErrMeasuredRateUnavailable is returned by a MeasuredRateClient
+// implementation for every failure mode a caller cannot usefully act on
+// differently: an unreachable labor-performance, a malformed response, or
+// a real 200 response reporting no measurable data yet for this path.
+// ProposePathPlan's single error-handling branch depends on this being
+// the ONLY error a MeasuredRateClient ever returns.
+
+// InstalledCapacityClient queries fulfillment-execution for the real,
+// live count of registered stations that hold a path's capability, so
+// CommitShiftPlan can enforce plannedHeads against physical reality
+// instead of trusting a caller-supplied installedStations count alone.
+// See ADR-0014 in this repo's docs for the full "why a new outbound
+// Supplier, why fail-LOUD (unlike MeasuredRateClient's fail-open)"
+// rationale: unlike a measured rate (a soft, optional enrichment to a
+// PROPOSAL), this feeds a hard ceiling on a COMMIT that mutates real
+// state -- this fleet's own rule is to fail loud for anything that
+// mutates real state.
+type InstalledCapacityClient interface {
+	// InstalledCapacity returns the real count of stations registered
+	// with pathId's capability in fulfillment-execution, or
+	// ErrInstalledCapacityUnavailable on ANY failure to produce one --
+	// unreachable service, malformed response, or a non-200. Unlike
+	// MeasuredRateClient, there is no "genuinely no stations yet" case
+	// to distinguish: fulfillment-execution's own endpoint already
+	// treats zero registered stations for a capability as a real,
+	// valid answer of 0, not an error -- so a real 0 here means
+	// exactly that, and CommitShiftPlan must reject any plannedHeads
+	// greater than 0 for that path.
+	InstalledCapacity(ctx context.Context, pathId shared.PathId) (int, error)
+}
+
+// ErrInstalledCapacityUnavailable is returned by an InstalledCapacityClient
+// implementation for every failure mode a caller cannot usefully act on
+// differently: an unreachable fulfillment-execution, a malformed
+// response, or a non-200 status. CommitShiftPlan's single
+// error-handling branch depends on this being the ONLY error an
+// InstalledCapacityClient ever returns, and treats it as FATAL to the
+// commit (fail loud), unlike MeasuredRateClient's fail-open contract.
+var ErrInstalledCapacityUnavailable = errors.New("installed capacity unavailable")
 
 // EventPublisher publishes domain events raised by aggregates.
 type EventPublisher interface {
