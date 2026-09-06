@@ -21,6 +21,7 @@ import (
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/filecatalog"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/fulfillmentexecution"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafka"
+	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafkacatalog"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/laborperformance"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/postgres"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/telemetry"
@@ -106,16 +107,70 @@ func run() error {
 	migrationsPath := envOrDefault("MIGRATIONS_PATH", "migrations")
 	maxHoursPerShift := envFloatOrDefault("MAX_HOURS_PER_SHIFT", 8.0)
 
-	// The process-path catalogue is loaded and validated once at boot,
-	// before anything else stands up — a missing or malformed catalogue
-	// file must stop this service from starting at all, never fall back
-	// to a partial/empty catalogue (mirrors fulfillment-execution's and
-	// wes-work-planning's identical boot-time contract; see ADR-0013).
-	catalogue, err := filecatalog.Load(envOrDefault("PATH_CATALOGUE_FILE", "/etc/workforce-management/process-paths.yaml"))
-	if err != nil {
-		return fmt.Errorf("failed to load the process-path catalogue: %w", err)
+	// The process-path catalogue's SOURCE is selectable, defaulting to
+	// the existing boot-time file read ("file") -- zero behavior change
+	// for any existing deployment unless PATH_CATALOGUE_SOURCE=kafka is
+	// explicitly set, matching this fleet's EVENT_PUBLISHER convention.
+	// See internal/adapters/outbound/kafkacatalog's package doc comment
+	// for the full rationale and the readiness-gate design, mirrored
+	// byte-for-byte from fulfillment-execution's and
+	// wes-work-planning's identical wiring.
+	catalogueSource := envOrDefault("PATH_CATALOGUE_SOURCE", "file")
+
+	var catalogue ports.PathCatalogue
+	var kafkaCatalogue *kafkacatalog.Consumer
+	// catalogueConsumerCtx/cancelCatalogueConsumer are declared here
+	// (rather than deferred to later in run()) because the Kafka
+	// catalogue source needs its own Run goroutine started BEFORE
+	// WaitReady is called below -- otherwise nothing would ever be
+	// consuming messages while this process waits, guaranteeing a
+	// deadlock until WaitReadyTimeout.
+	catalogueConsumerCtx, cancelCatalogueConsumer := context.WithCancel(context.Background())
+	defer cancelCatalogueConsumer()
+
+	switch catalogueSource {
+	case "kafka":
+		kafkaBrokersCSV := os.Getenv("KAFKA_BROKERS")
+		if kafkaBrokersCSV == "" {
+			return fmt.Errorf("PATH_CATALOGUE_SOURCE=kafka requires KAFKA_BROKERS to be set")
+		}
+		var err error
+		kafkaCatalogue, err = kafkacatalog.NewConsumer(ctx, strings.Split(kafkaBrokersCSV, ","), logger)
+		if err != nil {
+			return fmt.Errorf("failed to start the Kafka-sourced process-path catalogue: %w", err)
+		}
+		logger.Info("process-path catalogue source configured", "source", "kafka", "topic", kafkacatalog.Topic)
+		go func() {
+			logger.Info("process-path catalogue consumer running", "topic", kafkacatalog.Topic)
+			if err := kafkaCatalogue.Run(catalogueConsumerCtx); err != nil {
+				logger.Error("process-path catalogue consumer stopped", "error", err)
+			}
+		}()
+
+		logger.Info("waiting for the process-path catalogue to replay its initial history before accepting traffic")
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), kafkacatalog.WaitReadyTimeout)
+		err = kafkaCatalogue.WaitReady(waitCtx)
+		waitCancel()
+		if err != nil {
+			return fmt.Errorf("process-path catalogue did not become ready within %s: %w", kafkacatalog.WaitReadyTimeout, err)
+		}
+		logger.Info("process-path catalogue is ready", "paths", kafkaCatalogue.Ids())
+		catalogue = kafkaCatalogue
+	default:
+		// The process-path catalogue is loaded and validated once at
+		// boot, before anything else stands up — a missing or
+		// malformed catalogue file must stop this service from
+		// starting at all, never fall back to a partial/empty
+		// catalogue (mirrors fulfillment-execution's and
+		// wes-work-planning's identical boot-time contract; see
+		// ADR-0013).
+		fileCatalogue, err := filecatalog.Load(envOrDefault("PATH_CATALOGUE_FILE", "/etc/workforce-management/process-paths.yaml"))
+		if err != nil {
+			return fmt.Errorf("failed to load the process-path catalogue: %w", err)
+		}
+		logger.Info("process-path catalogue loaded", "paths", fileCatalogue.Ids())
+		catalogue = fileCatalogue
 	}
-	logger.Info("process-path catalogue loaded", "paths", catalogue.Ids())
 
 	if err := postgres.Migrate(databaseURL, migrationsPath); err != nil {
 		return err
@@ -175,6 +230,10 @@ func run() error {
 			return err
 		}
 	case <-stop:
+		cancelCatalogueConsumer()
+		if kafkaCatalogue != nil {
+			_ = kafkaCatalogue.Close()
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
