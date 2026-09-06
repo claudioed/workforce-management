@@ -14,8 +14,8 @@ import (
 	"github.com/riandyrn/otelchi"
 	otelchimetric "github.com/riandyrn/otelchi/metric"
 
+	"github.com/claudioed/workforce-management/internal/application/ports"
 	"github.com/claudioed/workforce-management/internal/application/usecases"
-	"github.com/claudioed/workforce-management/internal/domain/pathcatalog"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
 	"github.com/claudioed/workforce-management/internal/domain/shiftplan"
 )
@@ -43,7 +43,10 @@ type Handler struct {
 	// A nil Catalogue (only ever the case in older tests not yet
 	// updated) skips validation rather than panicking, so this is
 	// additive, not a required wiring change for every caller.
-	Catalogue *pathcatalog.Catalogue
+	// ports.PathCatalogue (not the concrete *pathcatalog.Catalogue) so
+	// an alternative source (e.g. a Kafka-fed catalogue) can be wired
+	// in without touching this struct.
+	Catalogue ports.PathCatalogue
 }
 
 // validatePathId checks pathId against h.Catalogue when one is wired

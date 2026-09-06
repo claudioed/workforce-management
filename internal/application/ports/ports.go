@@ -11,6 +11,7 @@ import (
 
 	"github.com/claudioed/workforce-management/internal/domain/assignment"
 	"github.com/claudioed/workforce-management/internal/domain/associate"
+	"github.com/claudioed/workforce-management/internal/domain/pathcatalog"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
 	"github.com/claudioed/workforce-management/internal/domain/shiftplan"
 )
@@ -113,4 +114,14 @@ type ProcessedEvents interface {
 // directly.
 type Clock interface {
 	Now() time.Time
+}
+
+// PathCatalogue is the outbound port for the fleet's declared process-path
+// catalogue — matches pathcatalog.Catalogue's own Lookup signature exactly,
+// so *pathcatalog.Catalogue already satisfies this interface with no
+// changes. Introduced so an alternative adapter (e.g. a Kafka-sourced
+// catalogue, see internal/adapters/outbound/kafkacatalog) can be wired in
+// wherever a *pathcatalog.Catalogue was previously required directly.
+type PathCatalogue interface {
+	Lookup(id string) (pathcatalog.PathDefinition, error)
 }
