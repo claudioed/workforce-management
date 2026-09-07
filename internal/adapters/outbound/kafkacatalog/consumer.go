@@ -111,23 +111,33 @@ type Consumer struct {
 // started", not "will it ever catch up to a topic that keeps growing".
 type targetOffsets map[int]int64
 
-// NewConsumer constructs a Consumer reading Topic from brokers under a
-// fresh, PROCESS-UNIQUE consumer group, starting at the earliest offset.
-// See the package doc comment for why the group must never be a fixed
-// shared name.
+// NewConsumer constructs a Consumer reading the production Topic from brokers
+// under a fresh, PROCESS-UNIQUE consumer group, starting at the earliest offset.
+// See the package doc comment for why the group must never be a fixed shared name.
 func NewConsumer(ctx context.Context, brokers []string, logger *slog.Logger) (*Consumer, error) {
+	return NewConsumerForTopic(ctx, brokers, Topic, logger)
+}
+
+// NewConsumerForTopic constructs the same replay/readiness consumer for a
+// caller-supplied topic. Production uses NewConsumer; this constructor makes it
+// possible to verify the identical logic against an isolated, throwaway Kafka
+// topic in integration tests without connecting to shared infrastructure.
+func NewConsumerForTopic(ctx context.Context, brokers []string, topic string, logger *slog.Logger) (*Consumer, error) {
+	if topic == "" {
+		return nil, fmt.Errorf("kafkacatalog: topic must not be empty")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	target, err := newTargetOffsets(ctx, brokers, Topic)
+	target, err := newTargetOffsets(ctx, brokers, topic)
 	if err != nil {
 		return nil, fmt.Errorf("kafkacatalog: determine readiness target: %w", err)
 	}
 
 	reader := kafkago.NewReader(kafkago.ReaderConfig{
 		Brokers:     brokers,
-		Topic:       Topic,
+		Topic:       topic,
 		GroupID:     uniqueConsumerGroup(),
 		StartOffset: kafkago.FirstOffset,
 	})
@@ -141,9 +151,8 @@ func NewConsumer(ctx context.Context, brokers []string, logger *slog.Logger) (*C
 	}
 	if len(target) == 0 {
 		// The topic has no partitions with any messages yet (a brand
-		// new topic, or process-path-management has never published)
-		// — there is nothing to catch up to, so this consumer is
-		// trivially ready from the start.
+		// new topic, or its producer has never published) — there is
+		// nothing to catch up to, so this consumer is trivially ready.
 		c.markReady()
 	}
 	return c, nil
