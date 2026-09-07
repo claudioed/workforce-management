@@ -24,6 +24,10 @@ type GetStaffingGap struct {
 	Assignments ports.AssignmentRepo
 	Events      ports.EventPublisher
 	Clock       ports.Clock
+	// UnitOfWork brackets the Publish (ADR 0016). This use case saves
+	// nothing, so the scope is trivial, but wrapping it keeps every
+	// publishing use case uniform: the outbox row commits on its own.
+	UnitOfWork ports.UnitOfWork
 }
 
 // Execute computes the gap for pathId within buildingId's shiftId plan.
@@ -48,7 +52,10 @@ func (uc *GetStaffingGap) Execute(ctx context.Context, buildingId, shiftId strin
 
 	if gap.Understaffed {
 		event := shared.NewPathUnderstaffed(uc.Clock.Now(), pathId, plannedHeads, activeHeads)
-		if err := uc.Events.Publish(ctx, event); err != nil {
+		err := atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+			return uc.Events.Publish(ctx, event)
+		})
+		if err != nil {
 			return StaffingGap{}, err
 		}
 	}

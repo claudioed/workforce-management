@@ -102,6 +102,7 @@ const sidebars: SidebarsConfig = {
         'adr/0013-process-path-catalogue-validation',
         'adr/0014-installed-capacity-ceiling',
         'adr/0015-standard-metrics-convention',
+        'adr/0016-transactional-outbox',
       ],
     },
   ],

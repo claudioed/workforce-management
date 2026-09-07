@@ -27,6 +27,10 @@ type AssignLabor struct {
 	Events           ports.EventPublisher
 	Clock            ports.Clock
 	MaxHoursPerShift float64
+	// UnitOfWork brackets every Save and the Publish atomically (ADR 0016).
+	// Optional: nil means "no transactional backing" and the calls run back
+	// to back, which is the in-memory / log-publisher configuration.
+	UnitOfWork ports.UnitOfWork
 }
 
 // Execute assigns associateId to pathId.
@@ -62,20 +66,27 @@ func (uc *AssignLabor) Execute(ctx context.Context, associateId shared.Associate
 		return nil, err
 	}
 
+	shiftChanged := false
 	if newHistory := la.History(); len(newHistory) > priorHistoryLen {
 		closed := newHistory[len(newHistory)-1]
 		if err := shift.LogHours(closed.Hours(now), uc.MaxHoursPerShift); err != nil {
 			return nil, err
 		}
-		if err := uc.Associates.Save(ctx, shift); err != nil {
-			return nil, err
-		}
+		shiftChanged = true
 	}
 
-	if err := uc.Assignments.Save(ctx, la); err != nil {
-		return nil, err
-	}
-	if err := uc.Events.Publish(ctx, la.PullEvents()...); err != nil {
+	err = atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		if shiftChanged {
+			if err := uc.Associates.Save(ctx, shift); err != nil {
+				return err
+			}
+		}
+		if err := uc.Assignments.Save(ctx, la); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, la.PullEvents()...)
+	})
+	if err != nil {
 		return nil, err
 	}
 	return la, nil

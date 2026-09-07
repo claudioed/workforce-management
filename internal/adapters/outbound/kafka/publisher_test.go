@@ -34,7 +34,7 @@ func newTestPublisher(t *testing.T, sp *shiftplan.ShiftPlan) (*Publisher, *fakeW
 		t.Fatalf("seed repo: %v", err)
 	}
 	fw := &fakeWriter{}
-	return &Publisher{writer: fw, shiftPlans: repo}, fw
+	return NewPublisherWithWriter(fw, repo), fw
 }
 
 func mustCommitPlan(t *testing.T, lines []shiftplan.PathPlan, installed map[shared.PathId]int) *shiftplan.ShiftPlan {

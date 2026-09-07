@@ -31,12 +31,6 @@ const tracerName = "github.com/claudioed/workforce-management/internal/adapters/
 // source identifies this service in the published envelope.
 const source = "workforce-management"
 
-// messageWriter is the subset of *segmentio.Writer this package depends on,
-// so tests can substitute a fake instead of hitting a real broker.
-type messageWriter interface {
-	WriteMessages(ctx context.Context, msgs ...segmentio.Message) error
-}
-
 // envelope is the cross-service message shape shared by every
 // warehouse-systems service, as documented in INTEGRATION.md.
 type envelope struct {
@@ -61,22 +55,30 @@ type envelopeData struct {
 // ShiftPlan's identity); ShiftPlans is used to load the committed plan's
 // PathPlan lines so one message can be fanned out per line, as
 // INTEGRATION.md requires.
+//
+// Because Encode reads ShiftPlans, the transactional outbox (ADR 0016)
+// calls Encode INSIDE the use case's transaction — that is the only way the
+// lookup sees the plan the same transaction just saved.
 type Publisher struct {
-	writer     messageWriter
+	writer     Writer
 	shiftPlans ports.ShiftPlanRepo
 }
 
 // NewPublisher constructs a Publisher writing to brokers on Topic.
 func NewPublisher(brokers []string, shiftPlans ports.ShiftPlanRepo) *Publisher {
-	return &Publisher{
-		writer: &segmentio.Writer{
-			Addr:                   segmentio.TCP(brokers...),
-			Topic:                  Topic,
-			Balancer:               &segmentio.LeastBytes{},
-			AllowAutoTopicCreation: true,
-		},
-		shiftPlans: shiftPlans,
-	}
+	return NewPublisherWithWriter(&segmentio.Writer{
+		Addr:                   segmentio.TCP(brokers...),
+		Topic:                  Topic,
+		Balancer:               &segmentio.LeastBytes{},
+		AllowAutoTopicCreation: true,
+	}, shiftPlans)
+}
+
+// NewPublisherWithWriter constructs a Publisher over an explicit Writer
+// (a fake in tests). writer is expected to have Topic pinned to Topic, as
+// NewPublisher does; Encode leaves Message.Topic empty accordingly.
+func NewPublisherWithWriter(writer Writer, shiftPlans ports.ShiftPlanRepo) *Publisher {
+	return &Publisher{writer: writer, shiftPlans: shiftPlans}
 }
 
 // Close releases the underlying Kafka writer's resources.
@@ -87,16 +89,20 @@ func (p *Publisher) Close() error {
 	return nil
 }
 
-// Publish fans ShiftPlanCommitted events out into one Kafka message per
+// Encode fans ShiftPlanCommitted events out into one wire-ready message per
 // PathPlan line. Other event types are ignored: this round only publishes
-// ShiftPlanCommitted, per INTEGRATION.md.
+// ShiftPlanCommitted, per INTEGRATION.md. Messages carry no key — the
+// existing integration contract has none, and the outbox must reproduce
+// the direct path's wire format byte-for-byte rather than change it.
 //
-// Each published message carries the current span context in its headers so
-// downstream services' consume spans are children of this publish span —
-// that is what makes a workforce-management -> consumer trace a single
-// distributed trace rather than two unrelated ones.
-func (p *Publisher) Publish(ctx context.Context, events ...shared.DomainEvent) error {
-	var msgs []segmentio.Message
+// The current span context (if any) is injected into every message's
+// headers so downstream services' consume spans are children of the span
+// active when the event was raised — whether the message is written
+// straight away by Publish or persisted to the outbox and written later
+// by the relay.
+func (p *Publisher) Encode(ctx context.Context, events ...shared.DomainEvent) ([]Encoded, error) {
+	var out []Encoded
+	propagator := otel.GetTextMapPropagator()
 	for _, e := range events {
 		committed, ok := e.(shared.ShiftPlanCommitted)
 		if !ok {
@@ -104,7 +110,7 @@ func (p *Publisher) Publish(ctx context.Context, events ...shared.DomainEvent) e
 		}
 		sp, err := p.shiftPlans.FindByBuildingAndShift(ctx, committed.BuildingId, committed.ShiftId)
 		if err != nil {
-			return fmt.Errorf("kafka publisher: load committed shift plan: %w", err)
+			return nil, fmt.Errorf("kafka publisher: load committed shift plan: %w", err)
 		}
 		for _, line := range sp.Lines() {
 			env := envelope{
@@ -123,34 +129,50 @@ func (p *Publisher) Publish(ctx context.Context, events ...shared.DomainEvent) e
 			}
 			b, err := json.Marshal(env)
 			if err != nil {
-				return fmt.Errorf("kafka publisher: marshal envelope: %w", err)
+				return nil, fmt.Errorf("kafka publisher: marshal envelope: %w", err)
 			}
-			msgs = append(msgs, segmentio.Message{Value: b})
+			enc := Encoded{Topic: Topic, EventType: committed.EventName(), Value: b}
+			propagator.Inject(ctx, propagation.TextMapCarrier(headerCarrier{headers: &enc.Headers}))
+			out = append(out, enc)
 		}
 	}
-	if len(msgs) == 0 {
+	return out, nil
+}
+
+// Publish encodes events (see Encode) and writes the result to Topic in one
+// broker round-trip, inside a `kafka.publish <topic>` producer span.
+func (p *Publisher) Publish(ctx context.Context, events ...shared.DomainEvent) error {
+	encoded, err := p.Encode(ctx, events...)
+	if err != nil {
+		return err
+	}
+	if len(encoded) == 0 {
 		return nil
 	}
-	return p.writeMessages(ctx, msgs)
+	return p.writeMessages(ctx, encoded)
 }
 
 // writeMessages wraps the broker write in a `kafka.publish <topic>` span (per
 // the OTel messaging semantic conventions) and injects that span's context
-// into every outgoing message's headers.
-func (p *Publisher) writeMessages(ctx context.Context, msgs []segmentio.Message) error {
+// into every outgoing message's headers, superseding the headers Encode
+// captured (the publish span is a child of the same trace, so nothing is
+// lost for the consumer).
+func (p *Publisher) writeMessages(ctx context.Context, encoded []Encoded) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "kafka.publish "+Topic,
 		trace.WithSpanKind(trace.SpanKindProducer),
 		trace.WithAttributes(
 			semconv.MessagingSystemKafka,
 			semconv.MessagingOperationName("publish"),
 			semconv.MessagingDestinationName(Topic),
-			semconv.MessagingBatchMessageCount(len(msgs)),
+			semconv.MessagingBatchMessageCount(len(encoded)),
 		),
 	)
 	defer span.End()
 
 	propagator := otel.GetTextMapPropagator()
-	for i := range msgs {
+	msgs := make([]segmentio.Message, len(encoded))
+	for i, enc := range encoded {
+		msgs[i] = enc.message(false)
 		propagator.Inject(ctx, propagation.TextMapCarrier(headerCarrier{headers: &msgs[i].Headers}))
 	}
 
@@ -180,3 +202,10 @@ func NewEventID() string {
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
+
+// Compile-time assertions: Publisher is both a direct publisher and an
+// outbox-feeding Encoder.
+var (
+	_ ports.EventPublisher = (*Publisher)(nil)
+	_ Encoder              = (*Publisher)(nil)
+)

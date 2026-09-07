@@ -12,6 +12,8 @@ type StartBreak struct {
 	Associates ports.AssociateRepo
 	Events     ports.EventPublisher
 	Clock      ports.Clock
+	// UnitOfWork brackets Save + Publish atomically (ADR 0016); nil = none.
+	UnitOfWork ports.UnitOfWork
 }
 
 // Execute starts the break.
@@ -23,10 +25,12 @@ func (uc *StartBreak) Execute(ctx context.Context, associateId shared.AssociateI
 	if err := shift.StartBreak(uc.Clock.Now()); err != nil {
 		return err
 	}
-	if err := uc.Associates.Save(ctx, shift); err != nil {
-		return err
-	}
-	return uc.Events.Publish(ctx, shift.PullEvents()...)
+	return atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		if err := uc.Associates.Save(ctx, shift); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, shift.PullEvents()...)
+	})
 }
 
 // EndBreak ends a logged break for an associate.
@@ -34,6 +38,8 @@ type EndBreak struct {
 	Associates ports.AssociateRepo
 	Events     ports.EventPublisher
 	Clock      ports.Clock
+	// UnitOfWork brackets Save + Publish atomically (ADR 0016); nil = none.
+	UnitOfWork ports.UnitOfWork
 }
 
 // Execute ends the break.
@@ -45,8 +51,10 @@ func (uc *EndBreak) Execute(ctx context.Context, associateId shared.AssociateId)
 	if err := shift.EndBreak(uc.Clock.Now()); err != nil {
 		return err
 	}
-	if err := uc.Associates.Save(ctx, shift); err != nil {
-		return err
-	}
-	return uc.Events.Publish(ctx, shift.PullEvents()...)
+	return atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		if err := uc.Associates.Save(ctx, shift); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, shift.PullEvents()...)
+	})
 }

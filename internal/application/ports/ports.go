@@ -99,6 +99,23 @@ type EventPublisher interface {
 	Publish(ctx context.Context, events ...shared.DomainEvent) error
 }
 
+// UnitOfWork brackets a use case's state changes and the domain events it
+// raises so all of them commit or none does (ADR 0016, transactional
+// outbox).
+//
+// Execute runs fn inside one atomic scope. Every Repo.Save and
+// EventPublisher.Publish made with the ctx handed to fn is bound to that
+// same scope: if fn returns an error the scope is rolled back and nothing
+// — neither the aggregate rows nor the outbox rows — is visible afterwards.
+//
+// Adapters that have no transactional backing (the in-memory repos, the
+// log publisher) need no implementation at all: use cases treat a nil
+// UnitOfWork as "run the calls back to back", so they stay adapter-agnostic
+// either way.
+type UnitOfWork interface {
+	Execute(ctx context.Context, fn func(ctx context.Context) error) error
+}
+
 // ProcessedEvents is the idempotency gate for at-least-once event consumption:
 // it records which event ids have already been handled so a redelivery is a
 // no-op. It is used by the analytics projector's inbound consumer; the OLTP
