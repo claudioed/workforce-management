@@ -115,7 +115,10 @@ func run() error {
 	server := inboundmcp.NewServer(deps)
 
 	auth := inboundmcp.NewStaticKeyAuth(authKeys(logger))
-	handler := inboundmcp.Handler(server, auth)
+	// The authenticated MCP handler is mounted at / and /mcp behind an
+	// unauthenticated GET /healthz so Kubernetes probes can reach the process
+	// without a bearer key (see router.go).
+	handler := newRouter(inboundmcp.Handler(server, auth))
 
 	srv := &http.Server{Addr: httpAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 

@@ -183,6 +183,30 @@ Optionally expose the curated read-only MCP tool `get_workforce_labor_report`
 by setting `REPORTS_BASE_URL` (e.g. `http://localhost:8092`) on `cmd/mcp`; it
 calls the reports REST and never opens the analytical database itself.
 
+## Running the MCP server in Kubernetes
+
+The MCP server ([ADR-0008](docs/docs/adr/0008-mcp-inbound-adapter.md)) is a
+fourth binary in the same image, `/app/mcp`, and the Helm chart deploys it as a
+separate Deployment + ClusterIP Service (`<release>-mcp`, port 8090) when
+`mcp.enabled=true` (default `false`, so existing releases are unaffected). It
+runs the same use cases over the same `DATABASE_URL` secret as the HTTP
+service, reads `MCP_ADDR` (default `:8090`), and takes its bearer keys from a
+chart-managed Secret (`mcp.readKey` / `mcp.readWriteKey`, or point
+`mcp.existingSecret` at one carrying `MCP_READ_KEY` / `MCP_READWRITE_KEY`).
+`GET /healthz` is served **unauthenticated** so the liveness/readiness probes
+can reach it; the MCP Streamable HTTP endpoint is mounted at both `/` and
+`/mcp` (so `http://<release>-mcp:8090/mcp` is the in-cluster endpoint to hand
+to warehouse-ops-agent), and every other path still goes through the bearer
+check. When `analytics.enabled` is also true, `REPORTS_BASE_URL` defaults to
+the in-cluster reports Service so `get_workforce_labor_report` works without
+extra values; override it with `mcp.reportsBaseUrl`.
+
+```bash
+helm upgrade --install workforce-management charts/workforce-management \
+  --set database.url="postgres://..." \
+  --set mcp.enabled=true --set mcp.readKey="$(openssl rand -hex 20)"
+```
+
 ## API
 
 All bodies are JSON. `{id}` and `{pathId}` are path parameters.
