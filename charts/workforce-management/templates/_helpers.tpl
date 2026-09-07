@@ -84,3 +84,21 @@ Name of the Secret holding the analytics DSNs, when the chart creates its own.
 {{- include "workforce-management.fullname" . }}-analytics
 {{- end }}
 {{- end }}
+
+{{/*
+Fully qualified name of the MCP server deployment/service (ADR-0008).
+*/}}
+{{- define "workforce-management.mcpFullname" -}}
+{{- include "workforce-management.fullname" . }}-mcp
+{{- end }}
+
+{{/*
+Name of the Secret holding the MCP bearer keys, when the chart creates its own.
+*/}}
+{{- define "workforce-management.mcpSecretName" -}}
+{{- if .Values.mcp.existingSecret }}
+{{- .Values.mcp.existingSecret }}
+{{- else }}
+{{- include "workforce-management.fullname" . }}-mcp
+{{- end }}
+{{- end }}
