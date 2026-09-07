@@ -49,28 +49,37 @@ type AnalyticsEnvelope struct {
 // and PathId for path-scoped events — so per-aggregate ordering is preserved on
 // the topic.
 type AnalyticsPublisher struct {
-	Writer messageWriter
+	Writer Writer
 	NewId  func() string
 }
 
 // NewAnalyticsPublisher constructs an AnalyticsPublisher writing to
 // AnalyticsTopic on brokers. newId mints the envelope event_id.
 func NewAnalyticsPublisher(brokers []string, newId func() string) *AnalyticsPublisher {
-	return &AnalyticsPublisher{
-		Writer: &segmentio.Writer{
-			Addr:                   segmentio.TCP(brokers...),
-			Topic:                  AnalyticsTopic,
-			Balancer:               &segmentio.LeastBytes{},
-			AllowAutoTopicCreation: true,
-		},
-		NewId: newId,
-	}
+	return NewAnalyticsPublisherWithWriter(&segmentio.Writer{
+		Addr:                   segmentio.TCP(brokers...),
+		Topic:                  AnalyticsTopic,
+		Balancer:               &segmentio.LeastBytes{},
+		AllowAutoTopicCreation: true,
+	}, newId)
 }
 
-// Publish emits every event in evts onto AnalyticsTopic. Events with no
-// analytics payload (an unrecognised type) are skipped rather than erroring, so
-// the caller can hand it the full event stream indiscriminately.
-func (p *AnalyticsPublisher) Publish(ctx context.Context, evts ...shared.DomainEvent) error {
+// NewAnalyticsPublisherWithWriter constructs an AnalyticsPublisher over an
+// explicit Writer (a fake in tests). writer is expected to have Topic
+// pinned to AnalyticsTopic, as NewAnalyticsPublisher does.
+func NewAnalyticsPublisherWithWriter(writer Writer, newId func() string) *AnalyticsPublisher {
+	return &AnalyticsPublisher{Writer: writer, NewId: newId}
+}
+
+// Encode turns every event in evts into a wire-ready AnalyticsEnvelope
+// message for AnalyticsTopic, keyed by aggregate id. Events with no
+// analytics payload (an unrecognised type) are skipped rather than
+// erroring, so the caller can hand it the full event stream
+// indiscriminately. The current span context (if any) is injected into
+// each message's headers.
+func (p *AnalyticsPublisher) Encode(ctx context.Context, evts ...shared.DomainEvent) ([]Encoded, error) {
+	var out []Encoded
+	propagator := otel.GetTextMapPropagator()
 	for _, e := range evts {
 		eventType, key, data, ok := marshalAnalyticsData(e)
 		if !ok {
@@ -86,9 +95,24 @@ func (p *AnalyticsPublisher) Publish(ctx context.Context, evts ...shared.DomainE
 		}
 		payload, err := json.Marshal(env)
 		if err != nil {
-			return fmt.Errorf("kafka: marshal analytics envelope: %w", err)
+			return nil, fmt.Errorf("kafka: marshal analytics envelope: %w", err)
 		}
-		if err := p.write(ctx, eventType, key, payload); err != nil {
+		enc := Encoded{Topic: AnalyticsTopic, EventType: eventType, Key: []byte(key), Value: payload}
+		propagator.Inject(ctx, propagation.TextMapCarrier(headerCarrier{headers: &enc.Headers}))
+		out = append(out, enc)
+	}
+	return out, nil
+}
+
+// Publish emits every event in evts onto AnalyticsTopic, one broker write
+// per message (see Encode for which events are skipped).
+func (p *AnalyticsPublisher) Publish(ctx context.Context, evts ...shared.DomainEvent) error {
+	encoded, err := p.Encode(ctx, evts...)
+	if err != nil {
+		return err
+	}
+	for _, enc := range encoded {
+		if err := p.write(ctx, enc); err != nil {
 			return err
 		}
 	}
@@ -167,11 +191,11 @@ func mustMarshal(v any) json.RawMessage {
 	return b
 }
 
-// write publishes one already-marshalled envelope inside a
+// write publishes one already-encoded message inside a
 // "kafka.publish <topic>" producer span, injecting that span's context into the
 // message headers (via the shared headerCarrier) so the projector's consume
 // span becomes its child.
-func (p *AnalyticsPublisher) write(ctx context.Context, eventType, key string, payload []byte) error {
+func (p *AnalyticsPublisher) write(ctx context.Context, enc Encoded) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "kafka.publish "+AnalyticsTopic,
 		trace.WithSpanKind(trace.SpanKindProducer),
 		trace.WithAttributes(
@@ -182,13 +206,13 @@ func (p *AnalyticsPublisher) write(ctx context.Context, eventType, key string, p
 	)
 	defer span.End()
 
-	msg := segmentio.Message{Key: []byte(key), Value: payload}
+	msg := enc.message(false)
 	otel.GetTextMapPropagator().Inject(ctx, propagation.TextMapCarrier(headerCarrier{headers: &msg.Headers}))
 
 	if err := p.Writer.WriteMessages(ctx, msg); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("kafka: publish %s analytics event: %w", eventType, err)
+		return fmt.Errorf("kafka: publish %s analytics event: %w", enc.EventType, err)
 	}
 	return nil
 }
@@ -201,6 +225,9 @@ func (p *AnalyticsPublisher) Close() error {
 	return nil
 }
 
-// Compile-time assertion that AnalyticsPublisher satisfies the outbound
-// event-publishing port.
-var _ ports.EventPublisher = (*AnalyticsPublisher)(nil)
+// Compile-time assertions that AnalyticsPublisher satisfies the outbound
+// event-publishing port and is an outbox-feeding Encoder.
+var (
+	_ ports.EventPublisher = (*AnalyticsPublisher)(nil)
+	_ Encoder              = (*AnalyticsPublisher)(nil)
+)

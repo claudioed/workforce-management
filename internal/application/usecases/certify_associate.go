@@ -12,6 +12,8 @@ type CertifyAssociate struct {
 	Associates ports.AssociateRepo
 	Events     ports.EventPublisher
 	Clock      ports.Clock
+	// UnitOfWork brackets Save + Publish atomically (ADR 0016); nil = none.
+	UnitOfWork ports.UnitOfWork
 }
 
 // Execute adds certification to associateId.
@@ -23,8 +25,10 @@ func (uc *CertifyAssociate) Execute(ctx context.Context, associateId shared.Asso
 	if err := shift.Certify(certification, uc.Clock.Now()); err != nil {
 		return err
 	}
-	if err := uc.Associates.Save(ctx, shift); err != nil {
-		return err
-	}
-	return uc.Events.Publish(ctx, shift.PullEvents()...)
+	return atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		if err := uc.Associates.Save(ctx, shift); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, shift.PullEvents()...)
+	})
 }

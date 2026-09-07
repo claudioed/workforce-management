@@ -16,16 +16,21 @@ type StartAssociateShift struct {
 	Associates ports.AssociateRepo
 	Events     ports.EventPublisher
 	Clock      ports.Clock
+	// UnitOfWork brackets Save + Publish atomically (ADR 0016); nil = none.
+	UnitOfWork ports.UnitOfWork
 }
 
 // Execute starts the associate's shift with the given certifications.
 func (uc *StartAssociateShift) Execute(ctx context.Context, associateId shared.AssociateId, certifications []shared.Certification) (*associate.AssociateShift, error) {
 	shift := associate.NewAssociateShift(associateId, certifications, uc.Clock.Now())
 
-	if err := uc.Associates.Save(ctx, shift); err != nil {
-		return nil, err
-	}
-	if err := uc.Events.Publish(ctx, shift.PullEvents()...); err != nil {
+	err := atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		if err := uc.Associates.Save(ctx, shift); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, shift.PullEvents()...)
+	})
+	if err != nil {
 		return nil, err
 	}
 	return shift, nil

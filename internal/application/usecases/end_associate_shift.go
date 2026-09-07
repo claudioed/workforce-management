@@ -16,6 +16,9 @@ type EndAssociateShift struct {
 	Events           ports.EventPublisher
 	Clock            ports.Clock
 	MaxHoursPerShift float64
+	// UnitOfWork brackets both Saves and the Publish atomically (ADR 0016);
+	// nil = none.
+	UnitOfWork ports.UnitOfWork
 }
 
 // Execute ends associateId's shift.
@@ -31,20 +34,26 @@ func (uc *EndAssociateShift) Execute(ctx context.Context, associateId shared.Ass
 	if err != nil && !errors.Is(err, ports.ErrNotFound) {
 		return err
 	}
+	assignmentChanged := false
 	if la != nil {
 		if closed, ok := la.EndActive(now); ok {
 			if err := shift.LogHours(closed.Hours(now), uc.MaxHoursPerShift); err != nil {
 				return err
 			}
-			if err := uc.Assignments.Save(ctx, la); err != nil {
-				return err
-			}
+			assignmentChanged = true
 		}
 	}
 
 	shift.EndShift(now)
-	if err := uc.Associates.Save(ctx, shift); err != nil {
-		return err
-	}
-	return uc.Events.Publish(ctx, shift.PullEvents()...)
+	return atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		if assignmentChanged {
+			if err := uc.Assignments.Save(ctx, la); err != nil {
+				return err
+			}
+		}
+		if err := uc.Associates.Save(ctx, shift); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, shift.PullEvents()...)
+	})
 }

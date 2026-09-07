@@ -24,13 +24,14 @@ func NewAssignmentRepo(pool *pgxpool.Pool) *AssignmentRepo {
 }
 
 // Save upserts la's active assignment and appends any newly closed history
-// entries.
+// entries. The multi-statement write joins the UnitOfWork transaction
+// bound to ctx when there is one, else runs in its own (ADR 0016).
 func (r *AssignmentRepo) Save(ctx context.Context, la *assignment.LaborAssignment) error {
-	tx, err := r.pool.Begin(ctx)
+	tx, commit, rollback, err := beginOrJoin(ctx, r.pool)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() { _ = rollback(ctx) }()
 
 	var activePathId *string
 	var activeStart *time.Time
@@ -66,7 +67,7 @@ func (r *AssignmentRepo) Save(ctx context.Context, la *assignment.LaborAssignmen
 		}
 	}
 
-	return tx.Commit(ctx)
+	return commit(ctx)
 }
 
 // FindByAssociateID loads the LaborAssignment for id, or ports.ErrNotFound.
@@ -74,7 +75,7 @@ func (r *AssignmentRepo) FindByAssociateID(ctx context.Context, id shared.Associ
 	var activePathId *string
 	var activeStart *time.Time
 
-	row := r.pool.QueryRow(ctx, `
+	row := querierFrom(ctx, r.pool).QueryRow(ctx, `
 		SELECT active_path_id, active_start FROM labor_assignment WHERE associate_id = $1
 	`, string(id))
 	if err := row.Scan(&activePathId, &activeStart); err != nil {
@@ -89,7 +90,7 @@ func (r *AssignmentRepo) FindByAssociateID(ctx context.Context, id shared.Associ
 		active = &assignment.Interval{PathId: shared.PathId(*activePathId), Start: *activeStart}
 	}
 
-	rows, err := r.pool.Query(ctx, `
+	rows, err := querierFrom(ctx, r.pool).Query(ctx, `
 		SELECT path_id, interval_start, interval_end
 		FROM labor_assignment_history WHERE associate_id = $1
 		ORDER BY id ASC
@@ -122,7 +123,7 @@ func (r *AssignmentRepo) FindByAssociateID(ctx context.Context, id shared.Associ
 // assignment to pathId.
 func (r *AssignmentRepo) CountActiveByPath(ctx context.Context, pathId shared.PathId) (int, error) {
 	var count int
-	err := r.pool.QueryRow(ctx, `
+	err := querierFrom(ctx, r.pool).QueryRow(ctx, `
 		SELECT COUNT(*) FROM labor_assignment WHERE active_path_id = $1
 	`, string(pathId)).Scan(&count)
 	return count, err

@@ -27,6 +27,10 @@ type CommitShiftPlan struct {
 	Clock             ports.Clock
 	InstalledCapacity ports.InstalledCapacityClient
 	MaxHoursPerShift  float64
+	// UnitOfWork brackets Save + Publish atomically (ADR 0016); nil = none.
+	// The integration publisher re-reads the saved plan while encoding, so
+	// the Publish MUST run inside the same scope as the Save.
+	UnitOfWork ports.UnitOfWork
 }
 
 // Execute fetches a live installed-capacity ceiling for every line from
@@ -51,10 +55,13 @@ func (uc *CommitShiftPlan) Execute(ctx context.Context, buildingId, shiftId stri
 	if err != nil {
 		return nil, err
 	}
-	if err := uc.ShiftPlans.Save(ctx, sp); err != nil {
-		return nil, err
-	}
-	if err := uc.Events.Publish(ctx, sp.PullEvents()...); err != nil {
+	err = atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		if err := uc.ShiftPlans.Save(ctx, sp); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, sp.PullEvents()...)
+	})
+	if err != nil {
 		return nil, err
 	}
 	return sp, nil
