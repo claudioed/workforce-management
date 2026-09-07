@@ -194,3 +194,40 @@ analytics:
       requests:
         cpu: 100m
         memory: 128Mi
+
+# --- MCP server (ADR-0008) ---
+# A second deployable (/app/mcp in the same image) exposing this context's
+# use cases to AI clients over MCP Streamable HTTP. It runs the same use
+# cases over the same OLTP database (DATABASE_URL from the database secret)
+# and is guarded by static bearer keys. Disabled by default so existing
+# releases are unaffected; set mcp.enabled=true and at least mcp.readKey (or
+# mcp.existingSecret) to deploy it. Without any key the binary starts but
+# rejects every request (fail closed).
+mcp:
+  enabled: false
+  replicaCount: 1
+  # MCP_ADDR the binary listens on; keep in sync with service.targetPort.
+  httpAddr: ":8090"
+  service:
+    type: ClusterIP
+    port: 8090
+    targetPort: 8090
+  # Bearer key granting read scope (MCP_READ_KEY).
+  readKey: ""
+  # Bearer key granting read-write scope (MCP_READWRITE_KEY); optional.
+  readWriteKey: ""
+  # Name of an existing Secret with MCP_READ_KEY and MCP_READWRITE_KEY keys.
+  # Takes precedence over the keys above (no Secret is created here).
+  existingSecret: ""
+  # Base URL of the reports REST service the curated
+  # get_workforce_labor_report tool calls (REPORTS_BASE_URL). When empty and
+  # analytics.enabled is true, defaults to the in-cluster reports Service.
+  # The tool is not registered when the resulting URL is empty.
+  reportsBaseUrl: ""
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
