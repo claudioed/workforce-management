@@ -3,7 +3,6 @@ package mcp_test
 import (
 	"context"
 	"math"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -17,9 +16,6 @@ import (
 	"github.com/claudioed/workforce-management/internal/domain/shared"
 	"github.com/claudioed/workforce-management/internal/domain/shiftplan"
 )
-
-const readKey = "test-read-key"
-const writeKey = "test-write-key"
 
 var base = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
@@ -39,23 +35,9 @@ func (unlimitedInstalledCapacity) InstalledCapacity(_ context.Context, _ shared.
 	return math.MaxInt32, nil
 }
 
-// bearerTransport adds a fixed Authorization header to every request, so the
-// in-process MCP client authenticates like a real one.
-type bearerTransport struct {
-	token string
-	base  http.RoundTripper
-}
-
-func (b bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if b.token != "" {
-		r.Header.Set("Authorization", "Bearer "+b.token)
-	}
-	return b.base.RoundTrip(r)
-}
-
 // newServer builds a real MCP HTTP server over in-memory repos seeded with a
-// committed pack plan (plannedHeads=3), one pack-certified associate a1, and a
-// read + read-write key. Returns the httptest URL.
+// committed pack plan (plannedHeads=3) and one pack-certified associate a1.
+// Returns the httptest URL.
 func newServer(t *testing.T) string {
 	t.Helper()
 	associates := memory.NewAssociateRepo()
@@ -84,22 +66,15 @@ func newServer(t *testing.T) string {
 		AssignLabor:     &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: publisher, Clock: clk, MaxHoursPerShift: maxHours},
 	}
 	server := inboundmcp.NewServer(deps)
-	auth := inboundmcp.NewStaticKeyAuth(map[string]inboundmcp.Scope{
-		readKey:  inboundmcp.ScopeRead,
-		writeKey: inboundmcp.ScopeReadWrite,
-	})
-	httpSrv := httptest.NewServer(inboundmcp.Handler(server, auth))
+	httpSrv := httptest.NewServer(inboundmcp.Handler(server))
 	t.Cleanup(httpSrv.Close)
 	return httpSrv.URL
 }
 
-func connect(t *testing.T, url, token string) *sdk.ClientSession {
+func connect(t *testing.T, url string) *sdk.ClientSession {
 	t.Helper()
 	client := sdk.NewClient(&sdk.Implementation{Name: "test-client", Version: "0.0.1"}, nil)
-	transport := &sdk.StreamableClientTransport{
-		Endpoint:   url,
-		HTTPClient: &http.Client{Transport: bearerTransport{token: token, base: http.DefaultTransport}},
-	}
+	transport := &sdk.StreamableClientTransport{Endpoint: url}
 	session, err := client.Connect(context.Background(), transport, nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -108,24 +83,9 @@ func connect(t *testing.T, url, token string) *sdk.ClientSession {
 	return session
 }
 
-func TestServer_UnauthenticatedIsRejected(t *testing.T) {
-	url := newServer(t)
-	resp, err := http.Post(url, "application/json", nil)
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", resp.StatusCode)
-	}
-	if got := resp.Header.Get("WWW-Authenticate"); got == "" {
-		t.Fatal("missing WWW-Authenticate challenge on 401")
-	}
-}
-
 func TestServer_ToolsListAndCall(t *testing.T) {
 	url := newServer(t)
-	session := connect(t, url, readKey)
+	session := connect(t, url)
 	ctx := context.Background()
 
 	tools, err := session.ListTools(ctx, nil)
@@ -165,7 +125,7 @@ func TestServer_ToolsListAndCall(t *testing.T) {
 
 func TestServer_CallToolRejectsMissingArgs(t *testing.T) {
 	url := newServer(t)
-	session := connect(t, url, readKey)
+	session := connect(t, url)
 	res, err := session.CallTool(context.Background(), &sdk.CallToolParams{
 		Name:      "get_staffing_gap",
 		Arguments: map[string]any{"buildingId": "B1", "shiftId": "S1", "pathId": ""},
@@ -180,7 +140,7 @@ func TestServer_CallToolRejectsMissingArgs(t *testing.T) {
 
 func TestServer_ResourceRead(t *testing.T) {
 	url := newServer(t)
-	session := connect(t, url, readKey)
+	session := connect(t, url)
 	res, err := session.ReadResource(context.Background(), &sdk.ReadResourceParams{
 		URI: "staffing://B1/S1/pack/gap",
 	})
@@ -194,7 +154,7 @@ func TestServer_ResourceRead(t *testing.T) {
 
 func TestServer_PromptGet(t *testing.T) {
 	url := newServer(t)
-	session := connect(t, url, readKey)
+	session := connect(t, url)
 	res, err := session.GetPrompt(context.Background(), &sdk.GetPromptParams{Name: "cover_staffing_gaps"})
 	if err != nil {
 		t.Fatalf("get prompt: %v", err)
@@ -204,24 +164,9 @@ func TestServer_PromptGet(t *testing.T) {
 	}
 }
 
-func TestServer_AssignLaborDeniedForReadOnlyKey(t *testing.T) {
+func TestServer_AssignLaborSucceeds(t *testing.T) {
 	url := newServer(t)
-	session := connect(t, url, readKey) // read-only key
-	res, err := session.CallTool(context.Background(), &sdk.CallToolParams{
-		Name:      "assign_labor",
-		Arguments: map[string]any{"associateId": "a1", "pathId": "pack"},
-	})
-	if err != nil {
-		t.Fatalf("call tool transport error: %v", err)
-	}
-	if !res.IsError {
-		t.Fatal("assign_labor with a read-only key must be denied (scope gate)")
-	}
-}
-
-func TestServer_AssignLaborSucceedsForWriteKey(t *testing.T) {
-	url := newServer(t)
-	session := connect(t, url, writeKey) // read-write key
+	session := connect(t, url)
 	res, err := session.CallTool(context.Background(), &sdk.CallToolParams{
 		Name:      "assign_labor",
 		Arguments: map[string]any{"associateId": "a1", "pathId": "pack"},
@@ -230,7 +175,7 @@ func TestServer_AssignLaborSucceedsForWriteKey(t *testing.T) {
 		t.Fatalf("call tool: %v", err)
 	}
 	if res.IsError {
-		t.Fatalf("assign_labor with write key returned error: %+v", res.Content)
+		t.Fatalf("assign_labor returned error: %+v", res.Content)
 	}
 	sc := res.StructuredContent.(map[string]any)
 	if sc["associateId"] != "a1" || sc["pathId"] != "pack" {

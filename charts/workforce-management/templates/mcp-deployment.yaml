@@ -23,8 +23,6 @@ spec:
       app.kubernetes.io/component: mcp
   template:
     metadata:
-      annotations:
-        checksum/mcp-secret: {{ include (print $.Template.BasePath "/mcp-secret.yaml") . | sha256sum }}
       labels:
         {{- include "workforce-management.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: mcp
@@ -63,20 +61,6 @@ spec:
               value: {{ .Values.config.maxHoursPerShift | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
-            # Static bearer keys (ADR-0008). Missing keys mean the server
-            # rejects every request — never "open to everyone".
-            - name: MCP_READ_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "workforce-management.mcpSecretName" . }}
-                  key: MCP_READ_KEY
-                  optional: true
-            - name: MCP_READWRITE_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "workforce-management.mcpSecretName" . }}
-                  key: MCP_READWRITE_KEY
-                  optional: true
             {{- if $reportsBaseURL }}
             - name: REPORTS_BASE_URL
               value: {{ $reportsBaseURL | quote }}
@@ -91,8 +75,6 @@ spec:
             - name: ENVIRONMENT
               value: {{ .Values.environment | quote }}
             {{- end }}
-          # GET /healthz is served unauthenticated by cmd/mcp specifically so
-          # probes (which carry no bearer key) can reach it.
           livenessProbe:
             httpGet:
               path: /healthz

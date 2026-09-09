@@ -40,13 +40,6 @@ info:
 servers:
   - url: http://localhost:8080
     description: Local development
-# Fleet-standard REST identity (ADR-0017; warehouse-ops-agent ADR 0005):
-# every operation requires a static bearer key. GET/HEAD/OPTIONS need the
-# read scope, every other method the read-write scope. Only /healthz opts
-# out (security: []). Failures are RFC 7807: 401 + WWW-Authenticate for a
-# missing/invalid credential, 403 for insufficient scope.
-security:
-  - bearerAuth: []
 tags:
   - name: Associates
     description: >-
@@ -73,7 +66,6 @@ paths:
     get:
       operationId: healthz
       summary: Liveness check
-      security: []
       description: >-
         Returns 200 with a static status body if the process is up and
         serving. Does not check downstream dependencies (e.g. Postgres
@@ -112,10 +104,6 @@ paths:
             example:
               certifications: ["pack"]
       responses:
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "201":
           description: >-
             Shift started. Location points at the associate resource
@@ -163,10 +151,6 @@ paths:
             example:
               certification: hazmat
       responses:
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "204":
           description: Certification added. No response body.
         "400":
@@ -214,10 +198,6 @@ paths:
               charge: 100
               plannedRate: 30
       responses:
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "200":
           description: Proposed heads for this path, not committed.
           content:
@@ -276,10 +256,6 @@ paths:
                   plannedHours: 16
                   installedStations: 10
       responses:
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "201":
           description: Shift plan committed.
           headers:
@@ -387,10 +363,6 @@ paths:
             example:
               pathId: pack
       responses:
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "201":
           description: >-
             Associate assigned. Location points at this associate's
@@ -450,10 +422,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/AssociateId"
       responses:
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "204":
           description: Break started. No response body.
         "400":
@@ -490,10 +458,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/AssociateId"
       responses:
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "204":
           description: Break ended. No response body.
         "400":
@@ -550,10 +514,6 @@ paths:
             type: string
           example: shift-1
       responses:
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "200":
           description: Staffing gap for this path within the committed plan.
           content:
@@ -597,10 +557,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/AssociateId"
       responses:
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "204":
           description: Shift ended (or was already ended). No response body.
         "400":
@@ -625,15 +581,6 @@ paths:
           $ref: "#/components/responses/InternalError"
 
 components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      description: >-
-        Static bearer key from the service's Secret (API_READ_KEY grants the
-        read scope, API_READWRITE_KEY grants read-write). GET/HEAD/OPTIONS
-        require read; every other method requires read-write. AUTH_MODE
-        selects enforce | log | off — see ADR-0017.
   parameters:
     AssociateId:
       name: id
@@ -658,40 +605,6 @@ components:
       example: pack
 
   responses:
-    Unauthorized:
-      description: >-
-        Missing or invalid bearer credential (unauthenticated). Carries a
-        `WWW-Authenticate: Bearer` challenge. Only returned when
-        AUTH_MODE=enforce.
-      headers:
-        WWW-Authenticate:
-          schema:
-            type: string
-          example: Bearer realm="warehouse-systems"
-      content:
-        application/problem+json:
-          schema:
-            $ref: "#/components/schemas/Problem"
-          example:
-            type: https://errors.workforce-management.warehouse-systems.dev/unauthenticated
-            title: Unauthorized
-            status: 401
-            detail: Missing or invalid bearer credential.
-            instance: /shift-plans
-    Forbidden:
-      description: >-
-        The credential is valid but does not grant the scope this method
-        requires (insufficient-scope) — a read key on a mutating request.
-      content:
-        application/problem+json:
-          schema:
-            $ref: "#/components/schemas/Problem"
-          example:
-            type: https://errors.workforce-management.warehouse-systems.dev/insufficient-scope
-            title: Forbidden
-            status: 403
-            detail: This credential does not grant the read-write scope.
-            instance: /shift-plans
     BadRequest:
       description: >-
         Malformed JSON body, or a required field was missing/empty

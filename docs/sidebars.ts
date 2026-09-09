@@ -104,6 +104,7 @@ const sidebars: SidebarsConfig = {
         'adr/0015-standard-metrics-convention',
         'adr/0016-transactional-outbox',
         'adr/0017-adopt-fleet-rest-identity',
+        'adr/0018-remove-fleet-rest-identity',
       ],
     },
   ],

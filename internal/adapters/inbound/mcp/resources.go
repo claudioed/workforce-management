@@ -18,7 +18,7 @@ import (
 //
 // The URI is templated (staffing://{buildingId}/{shiftId}/{pathId}/gap); the
 // concrete building/shift/path are read from the request URI at call time.
-func (d Deps) registerResources(server *mcp.Server, scopeOf func(context.Context) Scope) {
+func (d Deps) registerResources(server *mcp.Server) {
 	const template = "staffing://{buildingId}/{shiftId}/{pathId}/gap"
 	server.AddResourceTemplate(&mcp.ResourceTemplate{
 		URITemplate: template,
@@ -26,9 +26,6 @@ func (d Deps) registerResources(server *mcp.Server, scopeOf func(context.Context
 		Description: "Planned-vs-active heads and understaffed flag for one process path within a building's committed shift plan.",
 		MIMEType:    "application/json",
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-		if !scopeAllows(scopeOf(ctx), ScopeRead) {
-			return nil, fmt.Errorf("resource requires read scope")
-		}
 		buildingId, shiftId, pathId, err := parseStaffingURI(req.Params.URI)
 		if err != nil {
 			return nil, err

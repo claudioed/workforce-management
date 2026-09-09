@@ -28,7 +28,7 @@ Escalate to a human when: a path stays understaffed after the certified, availab
 Done means: for each path you were asked about you have reported planned vs active heads and the shortfall, proposed or performed any clearly-safe assignment, and surfaced any path still understaffed with a one-line reason.`
 
 // registerPrompts adds the workflow prompts (operational SOPs).
-func (d Deps) registerPrompts(server *mcp.Server, scopeOf func(context.Context) Scope) {
+func (d Deps) registerPrompts(server *mcp.Server) {
 	server.AddPrompt(&mcp.Prompt{
 		Name:        "cover_staffing_gaps",
 		Description: "Standard operating procedure for reading staffing gaps and covering understaffed paths with certified, available associates.",

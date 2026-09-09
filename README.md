@@ -127,11 +127,6 @@ Env vars:
 | `LABOR_PERFORMANCE_BASE_URL` | when `LABOR_PERFORMANCE_MODE=http` | — | labor-performance's base URL |
 | `INSTALLED_CAPACITY_MODE` | no | `permissive` | `http` or `permissive` — selects the `CommitShiftPlan` live installed-capacity ceiling client from fulfillment-execution (ADR-0014). Unlike `LABOR_PERFORMANCE_MODE`'s fail-open `permissive` default, this one is fail-LOUD: every `CommitShiftPlan` call is rejected until `http` mode is set, since a shift-plan commit mutates real state |
 | `FULFILLMENT_EXECUTION_BASE_URL` | when `INSTALLED_CAPACITY_MODE=http` | — | fulfillment-execution's base URL |
-| `AUTH_MODE` | no | `enforce` if any key is set, else `off` | REST identity mode ([ADR-0017](docs/docs/adr/0017-adopt-fleet-rest-identity.md)): `enforce` rejects unauthenticated/under-scoped requests (401/403 RFC 7807), `log` lets them through but logs `auth: would-reject` (the rollout gate), `off` disables the middleware. With no key configured the service starts in `off` and logs a WARN |
-| `API_READ_KEY` | no | — | static bearer key granting the **read** scope (`GET`/`HEAD`/`OPTIONS`). Falls back to `MCP_READ_KEY` so one Secret can serve the REST and MCP surfaces |
-| `API_READWRITE_KEY` | no | — | static bearer key granting the **read-write** scope (every other method). Falls back to `MCP_READWRITE_KEY` |
-| `FULFILLMENT_EXECUTION_API_KEY` | no | — | bearer this service presents to fulfillment-execution on every installed-capacity call; empty sends no `Authorization` header |
-| `LABOR_PERFORMANCE_API_KEY` | no | — | bearer this service presents to labor-performance on every measured-rate call; empty sends no `Authorization` header |
 | `PATH_CATALOGUE_FILE` | no | `/etc/workforce-management/process-paths.yaml` | Path to the declared process-path catalogue YAML (see `warehouse-infra`'s `config/process-paths/sortable-fc.yaml`, the same file `fulfillment-execution` and `wes-work-planning` read). Loaded once at startup; a missing or invalid file is a fatal boot-time error — see [ADR-0013](docs/docs/adr/0013-process-path-catalogue-validation.md) |
 | `LOG_LEVEL` | no | `info` | `debug`\|`info`\|`warn`\|`error` (case-insensitive) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | `localhost:4317` | OTel Collector gRPC endpoint — see [Observability](#observability) |
@@ -183,7 +178,6 @@ Analytics env vars (projector + reports):
 | `KAFKA_BROKERS` | no | `localhost:9092` | projector-only: broker list for the analytics topic |
 | `ADMIN_ADDR` | no | `:8091` | projector-only: health endpoint listen address |
 | `HTTP_ADDR` | no | `:8092` | reports-only: REST listen address |
-| `AUTH_MODE` / `API_READ_KEY` / `API_READWRITE_KEY` | no | as above | reports-only: same REST identity as the OLTP service; every `GET /reports/*` requires the **read** scope, `/healthz` stays open ([ADR-0017](docs/docs/adr/0017-adopt-fleet-rest-identity.md)) |
 
 Optionally expose the curated read-only MCP tool `get_workforce_labor_report`
 by setting `REPORTS_BASE_URL` (e.g. `http://localhost:8092`) on `cmd/mcp`; it
@@ -196,40 +190,23 @@ fourth binary in the same image, `/app/mcp`, and the Helm chart deploys it as a
 separate Deployment + ClusterIP Service (`<release>-mcp`, port 8090) when
 `mcp.enabled=true` (default `false`, so existing releases are unaffected). It
 runs the same use cases over the same `DATABASE_URL` secret as the HTTP
-service, reads `MCP_ADDR` (default `:8090`), and takes its bearer keys from a
-chart-managed Secret (`mcp.readKey` / `mcp.readWriteKey`, or point
-`mcp.existingSecret` at one carrying `MCP_READ_KEY` / `MCP_READWRITE_KEY`).
-Since [ADR-0017](docs/docs/adr/0017-adopt-fleet-rest-identity.md) the MCP
-binary reads its keys through the same `internal/adapters/inbound/auth`
-package as the REST surface: `API_READ_KEY` / `API_READWRITE_KEY` are the
-primary names and `MCP_READ_KEY` / `MCP_READWRITE_KEY` the fallbacks.
-`GET /healthz` is served **unauthenticated** so the liveness/readiness probes
-can reach it; the MCP Streamable HTTP endpoint is mounted at both `/` and
-`/mcp` (so `http://<release>-mcp:8090/mcp` is the in-cluster endpoint to hand
-to warehouse-ops-agent), and every other path still goes through the bearer
-check. When `analytics.enabled` is also true, `REPORTS_BASE_URL` defaults to
-the in-cluster reports Service so `get_workforce_labor_report` works without
-extra values; override it with `mcp.reportsBaseUrl`.
+service and reads `MCP_ADDR` (default `:8090`). `GET /healthz` serves
+liveness/readiness probes; the MCP Streamable HTTP endpoint is mounted at both
+`/` and `/mcp` (so `http://<release>-mcp:8090/mcp` is the in-cluster endpoint
+to hand to warehouse-ops-agent). When `analytics.enabled` is also true,
+`REPORTS_BASE_URL` defaults to the in-cluster reports Service so
+`get_workforce_labor_report` works without extra values; override it with
+`mcp.reportsBaseUrl`.
 
 ```bash
 helm upgrade --install workforce-management charts/workforce-management \
   --set database.url="postgres://..." \
-  --set mcp.enabled=true --set mcp.readKey="$(openssl rand -hex 20)"
+  --set mcp.enabled=true
 ```
 
 ## API
 
 All bodies are JSON. `{id}` and `{pathId}` are path parameters.
-
-**Authentication** ([ADR-0017](docs/docs/adr/0017-adopt-fleet-rest-identity.md)):
-every route except `GET /healthz` expects `Authorization: Bearer <key>`.
-`GET`/`HEAD`/`OPTIONS` need a key with the *read* scope (`API_READ_KEY`);
-every other method needs the *read-write* scope (`API_READWRITE_KEY`). A
-missing/invalid key is a 401 problem (`unauthenticated`, with a
-`WWW-Authenticate: Bearer` challenge); a valid but under-scoped key is a 403
-(`insufficient-scope`). Running locally without any key configured leaves
-auth **off** (the service logs a WARN), so the examples below work as-is;
-with keys set, add `-H "Authorization: Bearer $API_READWRITE_KEY"`.
 
 ```bash
 # Start an associate's shift with initial certifications

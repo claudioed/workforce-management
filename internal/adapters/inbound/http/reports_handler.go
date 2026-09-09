@@ -11,7 +11,6 @@ import (
 	"github.com/riandyrn/otelchi"
 	otelchimetric "github.com/riandyrn/otelchi/metric"
 
-	"github.com/claudioed/workforce-management/internal/adapters/inbound/auth"
 	"github.com/claudioed/workforce-management/internal/analytics/report"
 )
 
@@ -160,9 +159,6 @@ func writeReportInternal(w http.ResponseWriter, r *http.Request, err error) {
 // NewReportsRouter builds the chi router for the workforce-reports reader
 // service. A nil logger falls back to slog.Default(); an empty serviceName
 // falls back to DefaultReportsServiceName.
-//
-// With WithAuth, every /reports/* route requires the read scope (fleet ADR
-// 0005: reports are read-only surfaces); /healthz stays open for probes.
 func NewReportsRouter(h *ReportsHandlers, logger *slog.Logger, serviceName string, opts ...RouterOption) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
@@ -185,13 +181,8 @@ func NewReportsRouter(h *ReportsHandlers, logger *slog.Logger, serviceName strin
 	r.Use(middleware.Recoverer)
 
 	r.Get("/healthz", h.GetReportsHealthz)
-	r.Group(func(r chi.Router) {
-		if mw := authMiddleware(o, logger, func(*http.Request) auth.Scope { return auth.ScopeRead }); mw != nil {
-			r.Use(mw)
-		}
-		r.Get("/reports/labor", h.GetLabor)
-		r.Get("/reports/labor/freshness", h.GetFreshness)
-	})
+	r.Get("/reports/labor", h.GetLabor)
+	r.Get("/reports/labor/freshness", h.GetFreshness)
 
 	return r
 }
