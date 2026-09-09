@@ -14,6 +14,7 @@ import (
 	"github.com/riandyrn/otelchi"
 	otelchimetric "github.com/riandyrn/otelchi/metric"
 
+	"github.com/claudioed/workforce-management/internal/adapters/inbound/auth"
 	"github.com/claudioed/workforce-management/internal/application/ports"
 	"github.com/claudioed/workforce-management/internal/application/usecases"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
@@ -63,6 +64,43 @@ func (h *Handler) validatePathId(pathId shared.PathId) error {
 	return err
 }
 
+// RouterOption customises NewRouter / NewReportsRouter. Options exist so the
+// many existing callers that build a router without any auth configuration
+// keep working unchanged (they run with the middleware in auth.ModeOff).
+type RouterOption func(*routerOptions)
+
+type routerOptions struct {
+	authn auth.Authenticator
+	mode  auth.Mode
+}
+
+// WithAuth mounts the fleet-standard REST identity middleware (ADR-0017 /
+// warehouse-ops-agent ADR 0005) on every route EXCEPT /healthz. In the OLTP
+// router GET/HEAD/OPTIONS require the read scope and every other method
+// requires read-write; the reports router requires read for everything. A
+// nil authn or auth.ModeOff leaves the router unauthenticated.
+func WithAuth(authn auth.Authenticator, mode auth.Mode) RouterOption {
+	return func(o *routerOptions) {
+		o.authn = authn
+		o.mode = mode
+	}
+}
+
+// authMiddleware builds the auth.Middleware for the given options, or nil
+// when auth is off/unconfigured so callers can skip the r.Use.
+func authMiddleware(o routerOptions, logger *slog.Logger, required func(*http.Request) auth.Scope) func(http.Handler) http.Handler {
+	if o.authn == nil || o.mode == auth.ModeOff || o.mode == "" {
+		return nil
+	}
+	return auth.Middleware{
+		Authn:       o.authn,
+		Mode:        o.mode,
+		Logger:      logger,
+		ProblemBase: problemErrorsURIBase + "/",
+		Required:    required,
+	}.Handler
+}
+
 // NewRouter builds the chi router for the Workforce Management REST API.
 // A nil logger defaults to slog.Default(); an empty serviceName defaults to
 // DefaultServiceName.
@@ -70,12 +108,19 @@ func (h *Handler) validatePathId(pathId shared.PathId) error {
 // Middleware order matters: otelchi runs first so a span exists (and the
 // request context carries it) before RequestLogger emits its log line —
 // that is what puts trace_id/span_id on request logs.
-func NewRouter(h *Handler, logger *slog.Logger, serviceName string) http.Handler {
+//
+// /healthz is registered OUTSIDE the auth group so liveness/readiness probes
+// never need a bearer key; every business route sits inside it.
+func NewRouter(h *Handler, logger *slog.Logger, serviceName string, opts ...RouterOption) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if serviceName == "" {
 		serviceName = DefaultServiceName
+	}
+	var o routerOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -92,15 +137,20 @@ func NewRouter(h *Handler, logger *slog.Logger, serviceName string) http.Handler
 
 	r.Get("/healthz", h.healthz)
 
-	r.Post("/associates/{id}/start-shift", h.startShift)
-	r.Post("/associates/{id}/certifications", h.certify)
-	r.Post("/paths/{pathId}/plan/propose", h.proposePathPlan)
-	r.Post("/shift-plans", h.commitShiftPlan)
-	r.Post("/associates/{id}/assignments", h.assignLabor)
-	r.Post("/associates/{id}/break/start", h.startBreak)
-	r.Post("/associates/{id}/break/end", h.endBreak)
-	r.Get("/paths/{pathId}/staffing-gap", h.staffingGap)
-	r.Post("/associates/{id}/end-shift", h.endShift)
+	r.Group(func(r chi.Router) {
+		if mw := authMiddleware(o, logger, nil); mw != nil {
+			r.Use(mw)
+		}
+		r.Post("/associates/{id}/start-shift", h.startShift)
+		r.Post("/associates/{id}/certifications", h.certify)
+		r.Post("/paths/{pathId}/plan/propose", h.proposePathPlan)
+		r.Post("/shift-plans", h.commitShiftPlan)
+		r.Post("/associates/{id}/assignments", h.assignLabor)
+		r.Post("/associates/{id}/break/start", h.startBreak)
+		r.Post("/associates/{id}/break/end", h.endBreak)
+		r.Get("/paths/{pathId}/staffing-gap", h.staffingGap)
+		r.Post("/associates/{id}/end-shift", h.endShift)
+	})
 
 	return r
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/claudioed/workforce-management/internal/adapters/inbound/auth"
 	inbound "github.com/claudioed/workforce-management/internal/adapters/inbound/http"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/clock"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
@@ -201,8 +202,10 @@ func run() error {
 	// transaction is still correct, so the UnitOfWork is wired unconditionally.
 	uow := postgres.NewUnitOfWork(pool)
 
-	measuredRate := buildMeasuredRateClient(envOrDefault("LABOR_PERFORMANCE_MODE", "permissive"), os.Getenv("LABOR_PERFORMANCE_BASE_URL"), logger)
-	installedCapacity := buildInstalledCapacityClient(envOrDefault("INSTALLED_CAPACITY_MODE", "permissive"), os.Getenv("FULFILLMENT_EXECUTION_BASE_URL"), logger)
+	measuredRate := buildMeasuredRateClient(envOrDefault("LABOR_PERFORMANCE_MODE", "permissive"), os.Getenv("LABOR_PERFORMANCE_BASE_URL"), os.Getenv("LABOR_PERFORMANCE_API_KEY"), logger)
+	installedCapacity := buildInstalledCapacityClient(envOrDefault("INSTALLED_CAPACITY_MODE", "permissive"), os.Getenv("FULFILLMENT_EXECUTION_BASE_URL"), os.Getenv("FULFILLMENT_EXECUTION_API_KEY"), logger)
+
+	authn, authMode := configureAuth(os.Getenv, logger)
 
 	handler := &inbound.Handler{
 		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: publisher, Clock: sysClock, UnitOfWork: uow},
@@ -219,7 +222,7 @@ func run() error {
 
 	server := &http.Server{
 		Addr:              httpAddr,
-		Handler:           inbound.NewRouter(handler, logger, serviceName),
+		Handler:           inbound.NewRouter(handler, logger, serviceName, inbound.WithAuth(authn, authMode)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -349,18 +352,41 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
+// configureAuth builds the fleet-standard REST identity (ADR-0017 /
+// warehouse-ops-agent ADR 0005): static bearer keys from API_READ_KEY /
+// API_READWRITE_KEY (falling back to MCP_READ_KEY / MCP_READWRITE_KEY) and
+// AUTH_MODE=enforce|log|off. The default mode is "enforce" when at least
+// one key is configured and "off" (with a loud WARN) when none is, so local
+// runs and tests without keys keep working. Key material is never logged.
+func configureAuth(getenv func(string) string, logger *slog.Logger) (*auth.StaticKeyAuth, auth.Mode) {
+	authn := auth.NewStaticKeyAuth(auth.KeysFromEnv(getenv))
+	defaultMode := auth.ModeOff
+	if authn.HasKeys() {
+		defaultMode = auth.ModeEnforce
+	}
+	mode := auth.ParseMode(getenv("AUTH_MODE"), defaultMode)
+	if mode == auth.ModeOff {
+		logger.Warn("REST auth is OFF: no API_READ_KEY/API_READWRITE_KEY configured or AUTH_MODE=off")
+	}
+	logger.Info("REST auth configured", "mode", string(mode), "keys", len(auth.KeysFromEnv(getenv)))
+	return authn, mode
+}
+
 // buildMeasuredRateClient selects a ports.MeasuredRateClient via mode
 // (http|permissive), defaulting to "permissive" so unit tests, local dev,
 // and CI never reach the network unless explicitly opted in -- the same
 // pattern order-management uses for INVENTORY_STORAGE_MODE.
-func buildMeasuredRateClient(mode, baseURL string, logger *slog.Logger) ports.MeasuredRateClient {
+//
+// apiKey (LABOR_PERFORMANCE_API_KEY) is the optional bearer sent on every
+// call once labor-performance enforces REST auth (fleet ADR 0005).
+func buildMeasuredRateClient(mode, baseURL, apiKey string, logger *slog.Logger) ports.MeasuredRateClient {
 	if mode != "http" {
 		logger.Info("labor-performance measured rate client configured", "mode", "permissive",
 			"hint", "set LABOR_PERFORMANCE_MODE=http and LABOR_PERFORMANCE_BASE_URL for a real deployment")
 		return laborperformance.NewPermissiveClient()
 	}
-	logger.Info("labor-performance measured rate client configured", "mode", "http", "base_url", baseURL)
-	return laborperformance.NewClient(baseURL, nil)
+	logger.Info("labor-performance measured rate client configured", "mode", "http", "base_url", baseURL, "bearer", apiKey != "")
+	return laborperformance.NewClient(baseURL, nil, laborperformance.WithBearerToken(apiKey))
 }
 
 // buildInstalledCapacityClient selects a ports.InstalledCapacityClient via
@@ -370,14 +396,17 @@ func buildMeasuredRateClient(mode, baseURL string, logger *slog.Logger) ports.Me
 // is explicitly set, since a shift-plan commit mutates real state and
 // this fleet's own rule is to fail loud for anything that mutates real
 // state. See ADR-0014.
-func buildInstalledCapacityClient(mode, baseURL string, logger *slog.Logger) ports.InstalledCapacityClient {
+//
+// apiKey (FULFILLMENT_EXECUTION_API_KEY) is the optional bearer sent on
+// every call once fulfillment-execution enforces REST auth (fleet ADR 0005).
+func buildInstalledCapacityClient(mode, baseURL, apiKey string, logger *slog.Logger) ports.InstalledCapacityClient {
 	if mode != "http" {
 		logger.Warn("fulfillment-execution installed capacity client configured", "mode", "permissive",
 			"hint", "every ShiftPlan commit will fail until INSTALLED_CAPACITY_MODE=http and FULFILLMENT_EXECUTION_BASE_URL are set for a real deployment")
 		return fulfillmentexecution.NewPermissiveClient()
 	}
-	logger.Info("fulfillment-execution installed capacity client configured", "mode", "http", "base_url", baseURL)
-	return fulfillmentexecution.NewClient(baseURL, nil)
+	logger.Info("fulfillment-execution installed capacity client configured", "mode", "http", "base_url", baseURL, "bearer", apiKey != "")
+	return fulfillmentexecution.NewClient(baseURL, nil, fulfillmentexecution.WithBearerToken(apiKey))
 }
 
 func envFloatOrDefault(key string, def float64) float64 {

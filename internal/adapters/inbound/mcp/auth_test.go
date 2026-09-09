@@ -3,6 +3,8 @@ package mcp
 import (
 	"net/http"
 	"testing"
+
+	"github.com/claudioed/workforce-management/internal/adapters/inbound/auth"
 )
 
 func req(authHeader string) *http.Request {
@@ -13,8 +15,12 @@ func req(authHeader string) *http.Request {
 	return r
 }
 
+// The MCP adapter now delegates to internal/adapters/inbound/auth (ADR 0005
+// fleet decision). These tests pin the behaviour the MCP surface relies on
+// through the MCP package's own names, so a regression in the aliasing or in
+// the shared package would surface here.
 func TestStaticKeyAuth_Authenticate(t *testing.T) {
-	auth := NewStaticKeyAuth(map[string]Scope{
+	authn := NewStaticKeyAuth(map[string]Scope{
 		"read-key":  ScopeRead,
 		"write-key": ScopeReadWrite,
 		"":          ScopeReadWrite, // empty must be dropped
@@ -36,7 +42,7 @@ func TestStaticKeyAuth_Authenticate(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			scope, ok := auth.Authenticate(req(tc.header))
+			scope, ok := authn.Authenticate(req(tc.header))
 			if ok != tc.wantOK || scope != tc.wantScope {
 				t.Fatalf("Authenticate(%q) = (%q, %v), want (%q, %v)", tc.header, scope, ok, tc.wantScope, tc.wantOK)
 			}
@@ -45,9 +51,18 @@ func TestStaticKeyAuth_Authenticate(t *testing.T) {
 }
 
 func TestStaticKeyAuth_EmptyKeySetRejectsAll(t *testing.T) {
-	auth := NewStaticKeyAuth(map[string]Scope{"": ScopeReadWrite})
-	if _, ok := auth.Authenticate(req("Bearer anything")); ok {
+	authn := NewStaticKeyAuth(map[string]Scope{"": ScopeReadWrite})
+	if _, ok := authn.Authenticate(req("Bearer anything")); ok {
 		t.Fatal("empty key set must reject all requests")
+	}
+}
+
+func TestStaticKeyAuth_IsTheSharedFleetType(t *testing.T) {
+	// The MCP names must be aliases of the shared package's types, not a
+	// second copy: an auth.Authenticator built elsewhere is usable here.
+	var _ Authenticator = auth.NewStaticKeyAuth(map[string]auth.Scope{"k": auth.ScopeRead})
+	if ScopeRead != auth.ScopeRead || ScopeReadWrite != auth.ScopeReadWrite {
+		t.Fatal("MCP scope constants must equal the shared auth scopes")
 	}
 }
 

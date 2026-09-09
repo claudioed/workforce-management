@@ -14,6 +14,9 @@ spec:
       app.kubernetes.io/component: analytics-reports
   template:
     metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/auth-secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       labels:
         {{- include "workforce-management.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: analytics-reports
@@ -46,6 +49,9 @@ spec:
                 secretKeyRef:
                   name: {{ include "workforce-management.analyticsSecretName" . }}
                   key: ANALYTICS_READER_DATABASE_URL
+            # REST identity (ADR-0017 / fleet ADR 0005): every /reports/* route
+            # requires the read scope; same ConfigMap/Secret refs as the OLTP pod.
+            {{- include "workforce-management.authEnv" . | nindent 12 }}
             {{- if .Values.otel.enabled }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.otel.endpoint | quote }}
