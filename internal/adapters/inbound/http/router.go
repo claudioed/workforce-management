@@ -14,8 +14,8 @@ import (
 	"github.com/riandyrn/otelchi"
 	otelchimetric "github.com/riandyrn/otelchi/metric"
 
+	"github.com/claudioed/workforce-management/internal/application/ports"
 	"github.com/claudioed/workforce-management/internal/application/usecases"
-	"github.com/claudioed/workforce-management/internal/domain/pathcatalog"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
 	"github.com/claudioed/workforce-management/internal/domain/shiftplan"
 )
@@ -43,7 +43,10 @@ type Handler struct {
 	// A nil Catalogue (only ever the case in older tests not yet
 	// updated) skips validation rather than panicking, so this is
 	// additive, not a required wiring change for every caller.
-	Catalogue *pathcatalog.Catalogue
+	// ports.PathCatalogue (not the concrete *pathcatalog.Catalogue) so
+	// an alternative source (e.g. a Kafka-fed catalogue) can be wired
+	// in without touching this struct.
+	Catalogue ports.PathCatalogue
 }
 
 // validatePathId checks pathId against h.Catalogue when one is wired
@@ -60,6 +63,13 @@ func (h *Handler) validatePathId(pathId shared.PathId) error {
 	return err
 }
 
+// RouterOption customises NewRouter / NewReportsRouter. No options are
+// defined today; the type is kept so existing call sites (and any future
+// cross-cutting router configuration) do not need to change shape.
+type RouterOption func(*routerOptions)
+
+type routerOptions struct{}
+
 // NewRouter builds the chi router for the Workforce Management REST API.
 // A nil logger defaults to slog.Default(); an empty serviceName defaults to
 // DefaultServiceName.
@@ -67,12 +77,16 @@ func (h *Handler) validatePathId(pathId shared.PathId) error {
 // Middleware order matters: otelchi runs first so a span exists (and the
 // request context carries it) before RequestLogger emits its log line —
 // that is what puts trace_id/span_id on request logs.
-func NewRouter(h *Handler, logger *slog.Logger, serviceName string) http.Handler {
+func NewRouter(h *Handler, logger *slog.Logger, serviceName string, opts ...RouterOption) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if serviceName == "" {
 		serviceName = DefaultServiceName
+	}
+	var o routerOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -369,9 +383,9 @@ func (h *Handler) endShift(w http.ResponseWriter, r *http.Request) {
 
 // corsMiddleware allows the warehouse-console browser SPA (and this
 // service's own future MFE remote dev origin) to call this API directly
-// from the browser. Static-bearer-key auth, not cookies, so credentials
-// are never needed here. CORS_ALLOWED_ORIGINS overrides the local-dev
-// default (comma-separated) for staging/prod deployments.
+// from the browser. No credentials (cookies) are ever needed here.
+// CORS_ALLOWED_ORIGINS overrides the local-dev default (comma-separated)
+// for staging/prod deployments.
 func corsMiddleware() func(http.Handler) http.Handler {
 	origins := []string{"http://localhost:5173", "http://localhost:5185"}
 	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {

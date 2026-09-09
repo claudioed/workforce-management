@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,12 +16,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	inbound "github.com/claudioed/workforce-management/internal/adapters/inbound/http"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/clock"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/filecatalog"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/fulfillmentexecution"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafka"
+	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafkacatalog"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/laborperformance"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/postgres"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/telemetry"
@@ -106,16 +110,70 @@ func run() error {
 	migrationsPath := envOrDefault("MIGRATIONS_PATH", "migrations")
 	maxHoursPerShift := envFloatOrDefault("MAX_HOURS_PER_SHIFT", 8.0)
 
-	// The process-path catalogue is loaded and validated once at boot,
-	// before anything else stands up — a missing or malformed catalogue
-	// file must stop this service from starting at all, never fall back
-	// to a partial/empty catalogue (mirrors fulfillment-execution's and
-	// wes-work-planning's identical boot-time contract; see ADR-0013).
-	catalogue, err := filecatalog.Load(envOrDefault("PATH_CATALOGUE_FILE", "/etc/workforce-management/process-paths.yaml"))
-	if err != nil {
-		return fmt.Errorf("failed to load the process-path catalogue: %w", err)
+	// The process-path catalogue's SOURCE is selectable, defaulting to
+	// the existing boot-time file read ("file") -- zero behavior change
+	// for any existing deployment unless PATH_CATALOGUE_SOURCE=kafka is
+	// explicitly set, matching this fleet's EVENT_PUBLISHER convention.
+	// See internal/adapters/outbound/kafkacatalog's package doc comment
+	// for the full rationale and the readiness-gate design, mirrored
+	// byte-for-byte from fulfillment-execution's and
+	// wes-work-planning's identical wiring.
+	catalogueSource := envOrDefault("PATH_CATALOGUE_SOURCE", "file")
+
+	var catalogue ports.PathCatalogue
+	var kafkaCatalogue *kafkacatalog.Consumer
+	// catalogueConsumerCtx/cancelCatalogueConsumer are declared here
+	// (rather than deferred to later in run()) because the Kafka
+	// catalogue source needs its own Run goroutine started BEFORE
+	// WaitReady is called below -- otherwise nothing would ever be
+	// consuming messages while this process waits, guaranteeing a
+	// deadlock until WaitReadyTimeout.
+	catalogueConsumerCtx, cancelCatalogueConsumer := context.WithCancel(context.Background())
+	defer cancelCatalogueConsumer()
+
+	switch catalogueSource {
+	case "kafka":
+		kafkaBrokersCSV := os.Getenv("KAFKA_BROKERS")
+		if kafkaBrokersCSV == "" {
+			return fmt.Errorf("PATH_CATALOGUE_SOURCE=kafka requires KAFKA_BROKERS to be set")
+		}
+		var err error
+		kafkaCatalogue, err = kafkacatalog.NewConsumer(ctx, strings.Split(kafkaBrokersCSV, ","), logger)
+		if err != nil {
+			return fmt.Errorf("failed to start the Kafka-sourced process-path catalogue: %w", err)
+		}
+		logger.Info("process-path catalogue source configured", "source", "kafka", "topic", kafkacatalog.Topic)
+		go func() {
+			logger.Info("process-path catalogue consumer running", "topic", kafkacatalog.Topic)
+			if err := kafkaCatalogue.Run(catalogueConsumerCtx); err != nil {
+				logger.Error("process-path catalogue consumer stopped", "error", err)
+			}
+		}()
+
+		logger.Info("waiting for the process-path catalogue to replay its initial history before accepting traffic")
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), kafkacatalog.WaitReadyTimeout)
+		err = kafkaCatalogue.WaitReady(waitCtx)
+		waitCancel()
+		if err != nil {
+			return fmt.Errorf("process-path catalogue did not become ready within %s: %w", kafkacatalog.WaitReadyTimeout, err)
+		}
+		logger.Info("process-path catalogue is ready", "paths", kafkaCatalogue.Ids())
+		catalogue = kafkaCatalogue
+	default:
+		// The process-path catalogue is loaded and validated once at
+		// boot, before anything else stands up — a missing or
+		// malformed catalogue file must stop this service from
+		// starting at all, never fall back to a partial/empty
+		// catalogue (mirrors fulfillment-execution's and
+		// wes-work-planning's identical boot-time contract; see
+		// ADR-0013).
+		fileCatalogue, err := filecatalog.Load(envOrDefault("PATH_CATALOGUE_FILE", "/etc/workforce-management/process-paths.yaml"))
+		if err != nil {
+			return fmt.Errorf("failed to load the process-path catalogue: %w", err)
+		}
+		logger.Info("process-path catalogue loaded", "paths", fileCatalogue.Ids())
+		catalogue = fileCatalogue
 	}
-	logger.Info("process-path catalogue loaded", "paths", catalogue.Ids())
 
 	if err := postgres.Migrate(databaseURL, migrationsPath); err != nil {
 		return err
@@ -132,25 +190,30 @@ func run() error {
 	assignments := postgres.NewAssignmentRepo(pool)
 	sysClock := clock.System{}
 
-	publisher, closePublisher, err := newEventPublisher(shiftPlans, logger)
+	publisher, relay, closePublisher, err := newEventPublisher(pool, shiftPlans, logger)
 	if err != nil {
 		return err
 	}
 	defer closePublisher()
+	// Every publishing use case shares one UnitOfWork so its Saves and its
+	// Publish (an outbox INSERT in kafka mode) commit together (ADR 0016).
+	// The log publisher has nothing to bind, but bracketing the Saves in a
+	// transaction is still correct, so the UnitOfWork is wired unconditionally.
+	uow := postgres.NewUnitOfWork(pool)
 
 	measuredRate := buildMeasuredRateClient(envOrDefault("LABOR_PERFORMANCE_MODE", "permissive"), os.Getenv("LABOR_PERFORMANCE_BASE_URL"), logger)
 	installedCapacity := buildInstalledCapacityClient(envOrDefault("INSTALLED_CAPACITY_MODE", "permissive"), os.Getenv("FULFILLMENT_EXECUTION_BASE_URL"), logger)
 
 	handler := &inbound.Handler{
-		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: publisher, Clock: sysClock},
-		CertifyAssociate:    &usecases.CertifyAssociate{Associates: associates, Events: publisher, Clock: sysClock},
-		ProposePathPlan:     &usecases.ProposePathPlan{Events: publisher, Clock: sysClock, MeasuredRate: measuredRate},
-		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: publisher, Clock: sysClock, InstalledCapacity: installedCapacity, MaxHoursPerShift: maxHoursPerShift},
-		AssignLabor:         &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift},
-		StartBreak:          &usecases.StartBreak{Associates: associates, Events: publisher, Clock: sysClock},
-		EndBreak:            &usecases.EndBreak{Associates: associates, Events: publisher, Clock: sysClock},
-		GetStaffingGap:      &usecases.GetStaffingGap{ShiftPlans: shiftPlans, Assignments: assignments, Events: publisher, Clock: sysClock},
-		EndAssociateShift:   &usecases.EndAssociateShift{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift},
+		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: publisher, Clock: sysClock, UnitOfWork: uow},
+		CertifyAssociate:    &usecases.CertifyAssociate{Associates: associates, Events: publisher, Clock: sysClock, UnitOfWork: uow},
+		ProposePathPlan:     &usecases.ProposePathPlan{Events: publisher, Clock: sysClock, MeasuredRate: measuredRate, UnitOfWork: uow},
+		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: publisher, Clock: sysClock, InstalledCapacity: installedCapacity, MaxHoursPerShift: maxHoursPerShift, UnitOfWork: uow},
+		AssignLabor:         &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift, UnitOfWork: uow},
+		StartBreak:          &usecases.StartBreak{Associates: associates, Events: publisher, Clock: sysClock, UnitOfWork: uow},
+		EndBreak:            &usecases.EndBreak{Associates: associates, Events: publisher, Clock: sysClock, UnitOfWork: uow},
+		GetStaffingGap:      &usecases.GetStaffingGap{ShiftPlans: shiftPlans, Assignments: assignments, Events: publisher, Clock: sysClock, UnitOfWork: uow},
+		EndAssociateShift:   &usecases.EndAssociateShift{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift, UnitOfWork: uow},
 		Catalogue:           catalogue,
 	}
 
@@ -169,24 +232,65 @@ func run() error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
+	// The outbox relay (ADR 0016) runs alongside the HTTP server in the
+	// same process, draining outbox_events onto both Kafka topics. It is
+	// only wired in kafka mode (see newEventPublisher).
+	relayDone := make(chan struct{})
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	defer stopRelay()
+	if relay != nil {
+		go func() {
+			defer close(relayDone)
+			logger.Info("outbox relay running", "topics", []string{kafka.Topic, kafka.AnalyticsTopic})
+			if err := relay.Run(relayCtx); err != nil && !errors.Is(err, context.Canceled) {
+				serverErr <- err
+			}
+		}()
+	} else {
+		close(relayDone)
+	}
+
 	select {
 	case err := <-serverErr:
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
 	case <-stop:
+		cancelCatalogueConsumer()
+		if kafkaCatalogue != nil {
+			_ = kafkaCatalogue.Close()
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return server.Shutdown(shutdownCtx)
+		err := server.Shutdown(shutdownCtx)
+		// Let the relay finish its in-flight pass so an event committed by
+		// a request that completed just before shutdown is not stranded
+		// until the next pod boots.
+		stopRelay()
+		select {
+		case <-relayDone:
+		case <-shutdownCtx.Done():
+			logger.Warn("outbox relay did not stop before the shutdown deadline")
+		}
+		return err
 	}
 	return nil
 }
 
 // newEventPublisher selects an EventPublisher via EVENT_PUBLISHER
 // (kafka|log, default log) so existing behavior — and existing tests — are
-// unaffected unless kafka is explicitly opted into. It returns a close func
-// to release any adapter resources on shutdown.
-func newEventPublisher(shiftPlans ports.ShiftPlanRepo, logger *slog.Logger) (ports.EventPublisher, func(), error) {
+// unaffected unless kafka is explicitly opted into. It returns the
+// publisher, the outbox relay to run alongside the HTTP server (nil when
+// there is none), and a close func to release adapter resources on
+// shutdown.
+//
+// In kafka mode the use cases publish into the transactional outbox
+// (ADR 0016): both Kafka publishers act as Encoders feeding one
+// OutboxPublisher, and the relay forwards each row to the topic it names.
+// The direct MultiPublisher path is kept only for a nil pool, which this
+// binary never has (DATABASE_URL is required) — it is what an in-memory
+// composition would use, and it documents the matrix in the ADR.
+func newEventPublisher(pool *pgxpool.Pool, shiftPlans ports.ShiftPlanRepo, logger *slog.Logger) (ports.EventPublisher, *postgres.OutboxRelay, func(), error) {
 	switch envOrDefault("EVENT_PUBLISHER", "log") {
 	case "kafka":
 		brokers := strings.Split(envOrDefault("KAFKA_BROKERS", "localhost:9092"), ",")
@@ -195,21 +299,37 @@ func newEventPublisher(shiftPlans ports.ShiftPlanRepo, logger *slog.Logger) (por
 		// on a SEPARATE topic (ADR-0010). The integration publisher/topic is
 		// untouched; the analytics publisher is an additive second sink.
 		analytics := kafka.NewAnalyticsPublisher(brokers, kafka.NewEventID)
-		pub := events.NewMultiPublisher(integration, analytics)
-		logger.Info("event publisher configured", "publisher", "kafka",
-			"brokers", brokers, "topic", kafka.Topic, "analytics_topic", kafka.AnalyticsTopic)
-		return pub, func() {
+		closeDirect := func() {
 			if err := integration.Close(); err != nil {
 				logger.Error("kafka publisher close failed", "error", err)
 			}
 			if err := analytics.Close(); err != nil {
 				logger.Error("kafka analytics publisher close failed", "error", err)
 			}
+		}
+
+		if pool == nil {
+			logger.Info("event publisher configured", "publisher", "kafka", "mode", "direct",
+				"brokers", brokers, "topic", kafka.Topic, "analytics_topic", kafka.AnalyticsTopic)
+			return events.NewMultiPublisher(integration, analytics), nil, closeDirect, nil
+		}
+
+		sink := kafka.NewRelaySink(brokers)
+		relay := postgres.NewOutboxRelay(pool, sink, logger,
+			postgres.WithInterval(envDurationOrDefault("OUTBOX_RELAY_INTERVAL", time.Second)))
+		logger.Info("event publisher configured", "publisher", "kafka", "mode", "outbox",
+			"brokers", brokers, "topic", kafka.Topic, "analytics_topic", kafka.AnalyticsTopic)
+		return postgres.NewOutboxPublisher(pool, integration, analytics), relay, func() {
+			closeDirect()
+			if err := sink.Close(); err != nil {
+				logger.Error("kafka relay sink close failed", "error", err)
+			}
 		}, nil
 	case "log":
-		return events.NewLogPublisher(logger), func() {}, nil
+		logger.Info("event publisher configured", "publisher", "log")
+		return events.NewLogPublisher(logger), nil, func() {}, nil
 	default:
-		return nil, nil, fmt.Errorf("unknown EVENT_PUBLISHER %q (want kafka or log)", os.Getenv("EVENT_PUBLISHER"))
+		return nil, nil, nil, fmt.Errorf("unknown EVENT_PUBLISHER %q (want kafka or log)", os.Getenv("EVENT_PUBLISHER"))
 	}
 }
 
@@ -271,4 +391,20 @@ func envFloatOrDefault(key string, def float64) float64 {
 		os.Exit(1)
 	}
 	return f
+}
+
+// envDurationOrDefault parses key as a time.Duration, falling back on
+// absence or a malformed/non-positive value: the relay interval is a tuning
+// knob, not a contract, so it never fails the boot.
+func envDurationOrDefault(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		slog.Warn("invalid duration env var, using default", "key", key, "value", v, "default", def)
+		return def
+	}
+	return d
 }

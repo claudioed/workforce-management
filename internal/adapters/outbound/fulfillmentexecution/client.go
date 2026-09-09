@@ -51,14 +51,21 @@ type Client struct {
 	doer    HTTPDoer
 }
 
+// Option customises a Client built by NewClient.
+type Option func(*Client)
+
 // NewClient builds a Client against baseURL (from
 // FULFILLMENT_EXECUTION_BASE_URL). A nil doer defaults to an
 // *http.Client with DefaultTimeout.
-func NewClient(baseURL string, doer HTTPDoer) *Client {
+func NewClient(baseURL string, doer HTTPDoer, opts ...Option) *Client {
 	if doer == nil {
 		doer = &http.Client{Timeout: DefaultTimeout}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), doer: doer}
+	c := &Client{baseURL: strings.TrimRight(baseURL, "/"), doer: doer}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // installedCapacityResponse mirrors fulfillment-execution's

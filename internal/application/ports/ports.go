@@ -11,6 +11,7 @@ import (
 
 	"github.com/claudioed/workforce-management/internal/domain/assignment"
 	"github.com/claudioed/workforce-management/internal/domain/associate"
+	"github.com/claudioed/workforce-management/internal/domain/pathcatalog"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
 	"github.com/claudioed/workforce-management/internal/domain/shiftplan"
 )
@@ -98,6 +99,23 @@ type EventPublisher interface {
 	Publish(ctx context.Context, events ...shared.DomainEvent) error
 }
 
+// UnitOfWork brackets a use case's state changes and the domain events it
+// raises so all of them commit or none does (ADR 0016, transactional
+// outbox).
+//
+// Execute runs fn inside one atomic scope. Every Repo.Save and
+// EventPublisher.Publish made with the ctx handed to fn is bound to that
+// same scope: if fn returns an error the scope is rolled back and nothing
+// — neither the aggregate rows nor the outbox rows — is visible afterwards.
+//
+// Adapters that have no transactional backing (the in-memory repos, the
+// log publisher) need no implementation at all: use cases treat a nil
+// UnitOfWork as "run the calls back to back", so they stay adapter-agnostic
+// either way.
+type UnitOfWork interface {
+	Execute(ctx context.Context, fn func(ctx context.Context) error) error
+}
+
 // ProcessedEvents is the idempotency gate for at-least-once event consumption:
 // it records which event ids have already been handled so a redelivery is a
 // no-op. It is used by the analytics projector's inbound consumer; the OLTP
@@ -113,4 +131,14 @@ type ProcessedEvents interface {
 // directly.
 type Clock interface {
 	Now() time.Time
+}
+
+// PathCatalogue is the outbound port for the fleet's declared process-path
+// catalogue — matches pathcatalog.Catalogue's own Lookup signature exactly,
+// so *pathcatalog.Catalogue already satisfies this interface with no
+// changes. Introduced so an alternative adapter (e.g. a Kafka-sourced
+// catalogue, see internal/adapters/outbound/kafkacatalog) can be wired in
+// wherever a *pathcatalog.Catalogue was previously required directly.
+type PathCatalogue interface {
+	Lookup(id string) (pathcatalog.PathDefinition, error)
 }

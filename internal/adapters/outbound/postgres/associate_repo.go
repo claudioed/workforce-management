@@ -25,7 +25,7 @@ func NewAssociateRepo(pool *pgxpool.Pool) *AssociateRepo {
 // Save upserts a's current state.
 func (r *AssociateRepo) Save(ctx context.Context, a *associate.AssociateShift) error {
 	certs := certsToStrings(a.Certifications())
-	_, err := r.pool.Exec(ctx, `
+	_, err := querierFrom(ctx, r.pool).Exec(ctx, `
 		INSERT INTO associate_shift (associate_id, certifications, on_break, hours_logged, ended)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (associate_id) DO UPDATE SET
@@ -43,7 +43,7 @@ func (r *AssociateRepo) FindByID(ctx context.Context, id shared.AssociateId) (*a
 	var onBreak, ended bool
 	var hoursLogged float64
 
-	row := r.pool.QueryRow(ctx, `
+	row := querierFrom(ctx, r.pool).QueryRow(ctx, `
 		SELECT certifications, on_break, hours_logged, ended
 		FROM associate_shift WHERE associate_id = $1
 	`, string(id))

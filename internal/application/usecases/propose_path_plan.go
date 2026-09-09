@@ -36,6 +36,10 @@ type ProposePathPlan struct {
 	Events       ports.EventPublisher
 	Clock        ports.Clock
 	MeasuredRate ports.MeasuredRateClient
+	// UnitOfWork brackets the Publish (ADR 0016). This use case persists
+	// nothing, so the scope is trivial, but wrapping it keeps every
+	// publishing use case uniform: the outbox row commits on its own.
+	UnitOfWork ports.UnitOfWork
 }
 
 // Execute computes proposed heads and publishes ShiftPlanProposed. It
@@ -64,7 +68,10 @@ func (uc *ProposePathPlan) Execute(ctx context.Context, buildingId string, pathI
 
 	heads = shiftplan.ProposedHeads(charge, resolvedRate)
 	event := shared.NewShiftPlanProposed(uc.Clock.Now(), buildingId, pathId, heads, resolvedRate)
-	if err := uc.Events.Publish(ctx, event); err != nil {
+	err = atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		return uc.Events.Publish(ctx, event)
+	})
+	if err != nil {
 		return 0, 0, "", err
 	}
 	return heads, resolvedRate, rateSource, nil

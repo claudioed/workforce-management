@@ -16,6 +16,17 @@ same decision for `workforce-management`, Phase 5 of the estate-wide MCP
 rollout. The estate-wide rules it follows live in the
 [MCP Governance Charter](../mcp/governance-charter.md).
 
+**Addendum (2026-09-07) — deployable to the cluster.** Until now `cmd/mcp`
+existed only as code: the image did not build it and the chart had no
+Deployment for it. This addendum makes it a real deployable without changing
+the decision above: the Dockerfile now builds `/app/mcp`; the Helm chart gains
+an `mcp.*` block (`enabled: false` by default) rendering a Deployment, a
+ClusterIP Service (`<release>-mcp`, port 8090) and a Secret for the static
+bearer keys; and `cmd/mcp` serves an **unauthenticated** `GET /healthz` for
+probes while mounting the authenticated Streamable HTTP handler at both `/`
+and `/mcp`. `warehouse-infra` flips `mcp.enabled` and wires the keys into
+`warehouse-ops-agent`'s `WORKFORCE_MANAGEMENT_MCP_ENDPOINT`/`_READ_KEY`.
+
 ## Context
 
 The platform is being connected to the AI ecosystem (Claude, Cursor, ChatGPT,

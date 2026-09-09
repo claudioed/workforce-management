@@ -20,13 +20,15 @@ func NewShiftPlanRepo(pool *pgxpool.Pool) *ShiftPlanRepo {
 	return &ShiftPlanRepo{pool: pool}
 }
 
-// Save upserts sp and its PathPlan lines.
+// Save upserts sp and its PathPlan lines. The multi-statement write joins
+// the UnitOfWork transaction bound to ctx when there is one, else runs in
+// its own (ADR 0016).
 func (r *ShiftPlanRepo) Save(ctx context.Context, sp *shiftplan.ShiftPlan) error {
-	tx, err := r.pool.Begin(ctx)
+	tx, commit, rollback, err := beginOrJoin(ctx, r.pool)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() { _ = rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO shift_plan (building_id, shift_id) VALUES ($1, $2)
@@ -50,14 +52,14 @@ func (r *ShiftPlanRepo) Save(ctx context.Context, sp *shiftplan.ShiftPlan) error
 		}
 	}
 
-	return tx.Commit(ctx)
+	return commit(ctx)
 }
 
 // FindByBuildingAndShift loads the ShiftPlan for buildingId+shiftId, or
 // ports.ErrNotFound.
 func (r *ShiftPlanRepo) FindByBuildingAndShift(ctx context.Context, buildingId, shiftId string) (*shiftplan.ShiftPlan, error) {
 	var exists bool
-	if err := r.pool.QueryRow(ctx, `
+	if err := querierFrom(ctx, r.pool).QueryRow(ctx, `
 		SELECT EXISTS(SELECT 1 FROM shift_plan WHERE building_id = $1 AND shift_id = $2)
 	`, buildingId, shiftId).Scan(&exists); err != nil {
 		return nil, err
@@ -66,7 +68,7 @@ func (r *ShiftPlanRepo) FindByBuildingAndShift(ctx context.Context, buildingId, 
 		return nil, ports.ErrNotFound
 	}
 
-	rows, err := r.pool.Query(ctx, `
+	rows, err := querierFrom(ctx, r.pool).Query(ctx, `
 		SELECT path_id, planned_heads, planned_rate, planned_hours
 		FROM path_plan WHERE building_id = $1 AND shift_id = $2
 	`, buildingId, shiftId)

@@ -159,12 +159,16 @@ func writeReportInternal(w http.ResponseWriter, r *http.Request, err error) {
 // NewReportsRouter builds the chi router for the workforce-reports reader
 // service. A nil logger falls back to slog.Default(); an empty serviceName
 // falls back to DefaultReportsServiceName.
-func NewReportsRouter(h *ReportsHandlers, logger *slog.Logger, serviceName string) http.Handler {
+func NewReportsRouter(h *ReportsHandlers, logger *slog.Logger, serviceName string, opts ...RouterOption) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if serviceName == "" {
 		serviceName = DefaultReportsServiceName
+	}
+	var o routerOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
 
 	r := chi.NewRouter()

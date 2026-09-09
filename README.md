@@ -120,8 +120,9 @@ Env vars:
 | `HTTP_ADDR` | no | `:8080` | listen address |
 | `MIGRATIONS_PATH` | no | `migrations` | path to golang-migrate SQL files |
 | `MAX_HOURS_PER_SHIFT` | no | `8` | the configured max-hours-per-shift cap |
-| `EVENT_PUBLISHER` | no | `log` | `log` or `kafka` — see [Integration](#integration) |
+| `EVENT_PUBLISHER` | no | `log` | `log` or `kafka` — see [Integration](#integration). With `kafka`, events are written to the `outbox_events` table in the same transaction as the aggregate and relayed to both topics by an in-process relay ([ADR-0016](docs/docs/adr/0016-transactional-outbox.md)); they never go straight to the broker from a request |
 | `KAFKA_BROKERS` | no | `localhost:9092` | comma-separated broker list, used when `EVENT_PUBLISHER=kafka` |
+| `OUTBOX_RELAY_INTERVAL` | no | `1s` | how long the outbox relay sleeps between passes that found nothing to publish (Go duration; only meaningful with `EVENT_PUBLISHER=kafka`). A full batch is followed immediately by another pass |
 | `LABOR_PERFORMANCE_MODE` | no | `permissive` | `http` or `permissive` — selects the `ProposePathPlan` measured-rate feed from labor-performance (ADR-0012); `permissive` never reaches the network |
 | `LABOR_PERFORMANCE_BASE_URL` | when `LABOR_PERFORMANCE_MODE=http` | — | labor-performance's base URL |
 | `INSTALLED_CAPACITY_MODE` | no | `permissive` | `http` or `permissive` — selects the `CommitShiftPlan` live installed-capacity ceiling client from fulfillment-execution (ADR-0014). Unlike `LABOR_PERFORMANCE_MODE`'s fail-open `permissive` default, this one is fail-LOUD: every `CommitShiftPlan` call is rejected until `http` mode is set, since a shift-plan commit mutates real state |
@@ -181,6 +182,27 @@ Analytics env vars (projector + reports):
 Optionally expose the curated read-only MCP tool `get_workforce_labor_report`
 by setting `REPORTS_BASE_URL` (e.g. `http://localhost:8092`) on `cmd/mcp`; it
 calls the reports REST and never opens the analytical database itself.
+
+## Running the MCP server in Kubernetes
+
+The MCP server ([ADR-0008](docs/docs/adr/0008-mcp-inbound-adapter.md)) is a
+fourth binary in the same image, `/app/mcp`, and the Helm chart deploys it as a
+separate Deployment + ClusterIP Service (`<release>-mcp`, port 8090) when
+`mcp.enabled=true` (default `false`, so existing releases are unaffected). It
+runs the same use cases over the same `DATABASE_URL` secret as the HTTP
+service and reads `MCP_ADDR` (default `:8090`). `GET /healthz` serves
+liveness/readiness probes; the MCP Streamable HTTP endpoint is mounted at both
+`/` and `/mcp` (so `http://<release>-mcp:8090/mcp` is the in-cluster endpoint
+to hand to warehouse-ops-agent). When `analytics.enabled` is also true,
+`REPORTS_BASE_URL` defaults to the in-cluster reports Service so
+`get_workforce_labor_report` works without extra values; override it with
+`mcp.reportsBaseUrl`.
+
+```bash
+helm upgrade --install workforce-management charts/workforce-management \
+  --set database.url="postgres://..." \
+  --set mcp.enabled=true
+```
 
 ## API
 
@@ -277,6 +299,13 @@ service. This round it only publishes — it does not consume anything.
 - **Selection**: `EVENT_PUBLISHER=kafka` to publish to Kafka, `EVENT_PUBLISHER=log`
   (default) to keep publishing to the in-memory/log publisher used by tests
   and local runs that don't need cross-service integration.
+- **Delivery** ([ADR-0016](docs/docs/adr/0016-transactional-outbox.md)): with
+  `EVENT_PUBLISHER=kafka` the use case inserts the already-encoded message(s)
+  for BOTH topics into `outbox_events` inside the same Postgres transaction
+  as the aggregate, and a relay goroutine in `cmd/workforce` drains that
+  table onto Kafka every `OUTBOX_RELAY_INTERVAL`. The store and the topics
+  therefore cannot diverge; delivery is at-least-once, per-key ordered, and
+  lands within one relay interval of the HTTP response.
 - **Fan-out**: a `ShiftPlan` has multiple `PathPlan` lines. `CommitShiftPlan`
   with 3 path lines publishes **3** Kafka messages — one per path line, each
   carrying that single path's `planned_heads`/`planned_rate`/`planned_hours`.
@@ -387,7 +416,7 @@ make check        # fast pre-commit loop: fmt-check, vet, build, lint, test (-ra
 make check-all    # before pushing: check + coverage gate (90%), arch-test, bdd
 make vuln         # govulncheck ./... — known CVEs in deps and the Go stdlib
 make mutation     # fast gremlins subset (blocks in CI); mutation-full = exhaustive
-make integration  # needs a running Postgres + DATABASE_URL (not part of check)
+make integration  # repo/outbox tests; outbox tests boot their own Postgres via testcontainers (Docker needed)
 ```
 
 Git hooks are managed with [lefthook](https://github.com/evilmartians/lefthook)
@@ -417,10 +446,12 @@ go test ./...
 go test ./... -race
 gofmt -l .                      # should print nothing
 
-# Postgres integration tests (build-tagged, skipped without DATABASE_URL)
+# Postgres integration tests (build-tagged). The repo tests need DATABASE_URL;
+# the outbox tests (-run Outbox) start their own Postgres via testcontainers.
 docker compose up -d
 export DATABASE_URL="postgres://workforce:workforce@localhost:5432/workforce?sslmode=disable"
 go test -tags=integration ./internal/adapters/outbound/postgres/...
+go test -tags=integration ./internal/adapters/outbound/postgres/ -run Outbox -race -count=1
 ```
 
 The four invariants named in this context's Definition of Done each have a
