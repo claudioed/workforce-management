@@ -103,6 +103,7 @@ const sidebars: SidebarsConfig = {
         'adr/0014-installed-capacity-ceiling',
         'adr/0015-standard-metrics-convention',
         'adr/0016-transactional-outbox',
+        'adr/0017-adopt-fleet-rest-identity',
       ],
     },
   ],

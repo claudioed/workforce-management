@@ -49,16 +49,33 @@ type HTTPDoer interface {
 type Client struct {
 	baseURL string
 	doer    HTTPDoer
+	// bearerToken, when non-empty, is sent as "Authorization: Bearer ..." on
+	// every request (fleet ADR 0005: FULFILLMENT_EXECUTION_API_KEY).
+	bearerToken string
+}
+
+// Option customises a Client built by NewClient.
+type Option func(*Client)
+
+// WithBearerToken sets the static bearer credential presented to
+// fulfillment-execution. An empty token sends no Authorization header, so a
+// deployment that has not yet issued keys keeps working unchanged.
+func WithBearerToken(token string) Option {
+	return func(c *Client) { c.bearerToken = token }
 }
 
 // NewClient builds a Client against baseURL (from
 // FULFILLMENT_EXECUTION_BASE_URL). A nil doer defaults to an
 // *http.Client with DefaultTimeout.
-func NewClient(baseURL string, doer HTTPDoer) *Client {
+func NewClient(baseURL string, doer HTTPDoer, opts ...Option) *Client {
 	if doer == nil {
 		doer = &http.Client{Timeout: DefaultTimeout}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), doer: doer}
+	c := &Client{baseURL: strings.TrimRight(baseURL, "/"), doer: doer}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // installedCapacityResponse mirrors fulfillment-execution's
@@ -86,6 +103,9 @@ func (c *Client) InstalledCapacity(ctx context.Context, pathId shared.PathId) (i
 		return 0, fmt.Errorf("%w: %w", ports.ErrInstalledCapacityUnavailable, err)
 	}
 	req.Header.Set("Accept", "application/json")
+	if c.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	}
 
 	resp, err := c.doer.Do(req)
 	if err != nil {
