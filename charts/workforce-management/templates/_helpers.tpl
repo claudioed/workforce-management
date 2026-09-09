@@ -61,45 +61,6 @@ so we surface that as a helm install-time error instead.
 {{- end -}}
 
 {{/*
-Name of the Secret holding the REST identity keys (API_READ_KEY,
-API_READWRITE_KEY and the per-peer <PEER>_API_KEY bearers), when the chart
-creates its own (ADR-0017 / fleet ADR 0005).
-*/}}
-{{- define "workforce-management.authSecretName" -}}
-{{- if .Values.auth.existingSecret }}
-{{- .Values.auth.existingSecret }}
-{{- else }}
-{{- include "workforce-management.fullname" . }}-auth
-{{- end }}
-{{- end }}
-
-{{/*
-The REST identity env block shared by the OLTP and reports Deployments:
-AUTH_MODE from the ConfigMap and the inbound bearer keys from the auth
-Secret. Every secretKeyRef is optional so a release with no keys (auth off)
-still schedules.
-*/}}
-{{- define "workforce-management.authEnv" -}}
-- name: AUTH_MODE
-  valueFrom:
-    configMapKeyRef:
-      name: {{ include "workforce-management.fullname" . }}
-      key: AUTH_MODE
-- name: API_READ_KEY
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "workforce-management.authSecretName" . }}
-      key: API_READ_KEY
-      optional: true
-- name: API_READWRITE_KEY
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "workforce-management.authSecretName" . }}
-      key: API_READWRITE_KEY
-      optional: true
-{{- end }}
-
-{{/*
 Fully qualified name of the analytics projector deployment (ADR-0010).
 */}}
 {{- define "workforce-management.projectorFullname" -}}
@@ -131,13 +92,3 @@ Fully qualified name of the MCP server deployment/service (ADR-0008).
 {{- include "workforce-management.fullname" . }}-mcp
 {{- end }}
 
-{{/*
-Name of the Secret holding the MCP bearer keys, when the chart creates its own.
-*/}}
-{{- define "workforce-management.mcpSecretName" -}}
-{{- if .Values.mcp.existingSecret }}
-{{- .Values.mcp.existingSecret }}
-{{- else }}
-{{- include "workforce-management.fullname" . }}-mcp
-{{- end }}
-{{- end }}

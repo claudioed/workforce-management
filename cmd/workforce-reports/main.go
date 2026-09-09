@@ -16,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/claudioed/workforce-management/internal/adapters/inbound/auth"
 	inboundhttp "github.com/claudioed/workforce-management/internal/adapters/inbound/http"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/analyticsstore"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/telemetry"
@@ -73,8 +72,7 @@ func run() error {
 	}
 
 	handlers := &inboundhttp.ReportsHandlers{Store: analyticsstore.NewPostgresReport(pool)}
-	authn, authMode := configureAuth(os.Getenv, logger)
-	router := inboundhttp.NewReportsRouter(handlers, logger, serviceName, inboundhttp.WithAuth(authn, authMode))
+	router := inboundhttp.NewReportsRouter(handlers, logger, serviceName)
 
 	srv := &http.Server{Addr: httpAddr, Handler: router, ReadHeaderTimeout: 5 * time.Second}
 
@@ -92,27 +90,6 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(ctx)
-}
-
-// configureAuth builds the fleet-standard REST identity (ADR-0017 /
-// warehouse-ops-agent ADR 0005) for the reports reader: every /reports/*
-// route requires the read scope. Keys come from API_READ_KEY /
-// API_READWRITE_KEY (falling back to MCP_READ_KEY / MCP_READWRITE_KEY);
-// AUTH_MODE=enforce|log|off defaults to enforce when a key is set and to
-// off (with a WARN) when none is. Key material is never logged.
-func configureAuth(getenv func(string) string, logger *slog.Logger) (*auth.StaticKeyAuth, auth.Mode) {
-	keys := auth.KeysFromEnv(getenv)
-	authn := auth.NewStaticKeyAuth(keys)
-	defaultMode := auth.ModeOff
-	if authn.HasKeys() {
-		defaultMode = auth.ModeEnforce
-	}
-	mode := auth.ParseMode(getenv("AUTH_MODE"), defaultMode)
-	if mode == auth.ModeOff {
-		logger.Warn("REST auth is OFF: no API_READ_KEY/API_READWRITE_KEY configured or AUTH_MODE=off")
-	}
-	logger.Info("REST auth configured", "mode", string(mode), "keys", len(keys))
-	return authn, mode
 }
 
 // version is the service version reported as the OTel service.version resource

@@ -10,7 +10,8 @@ description: ADR 0017 — workforce-management adopts the fleet-wide REST identi
 
 ## Status
 
-Accepted — implemented in the same change that introduced this record.
+Superseded by [ADR-0018](./0018-remove-fleet-rest-identity.md). Originally
+accepted, implemented in the same change that introduced this record.
 Adopts warehouse-ops-agent
 [ADR 0005](https://github.com/claudioed/warehouse-ops-agent/blob/develop/docs/docs/adr/0005-rest-identity-static-bearer-scopes.md)
 (fleet-wide REST identity), which holds the full context and rationale.

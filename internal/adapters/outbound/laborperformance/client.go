@@ -50,20 +50,10 @@ type HTTPDoer interface {
 type Client struct {
 	baseURL string
 	doer    HTTPDoer
-	// bearerToken, when non-empty, is sent as "Authorization: Bearer ..." on
-	// every request (fleet ADR 0005: LABOR_PERFORMANCE_API_KEY).
-	bearerToken string
 }
 
 // Option customises a Client built by NewClient.
 type Option func(*Client)
-
-// WithBearerToken sets the static bearer credential presented to
-// labor-performance. An empty token sends no Authorization header, so a
-// deployment that has not yet issued keys keeps working unchanged.
-func WithBearerToken(token string) Option {
-	return func(c *Client) { c.bearerToken = token }
-}
 
 // NewClient builds a Client against baseURL (from LABOR_PERFORMANCE_BASE_URL).
 // A nil doer defaults to an *http.Client with DefaultTimeout.
@@ -128,9 +118,6 @@ func (c *Client) MeanActualSeconds(ctx context.Context, pathId shared.PathId) (f
 		return 0, fmt.Errorf("%w: %w", ports.ErrMeasuredRateUnavailable, err)
 	}
 	req.Header.Set("Accept", "application/json")
-	if c.bearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
-	}
 
 	resp, err := c.doer.Do(req)
 	if err != nil {

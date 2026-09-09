@@ -3,12 +3,6 @@
 // cases, and those to the inbound MCP adapter, then serves MCP over Streamable
 // HTTP. It is a second, independent deployable alongside cmd/workforce (the
 // HTTP service), per ADR-0008.
-//
-// Auth is a static bearer key (no IdP): set API_READ_KEY / API_READWRITE_KEY
-// (or the MCP_READ_KEY / MCP_READWRITE_KEY fallbacks) from a Kubernetes
-// Secret. A request must present a valid key; the scope it grants gates the
-// tools. The key map is read through the shared
-// internal/adapters/inbound/auth package (ADR-0017 / fleet ADR 0005).
 package main
 
 import (
@@ -22,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/claudioed/workforce-management/internal/adapters/inbound/auth"
 	inboundmcp "github.com/claudioed/workforce-management/internal/adapters/inbound/mcp"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/clock"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
@@ -117,11 +110,9 @@ func run() error {
 	}
 	server := inboundmcp.NewServer(deps)
 
-	authn := inboundmcp.NewStaticKeyAuth(authKeys(logger))
-	// The authenticated MCP handler is mounted at / and /mcp behind an
-	// unauthenticated GET /healthz so Kubernetes probes can reach the process
-	// without a bearer key (see router.go).
-	handler := newRouter(inboundmcp.Handler(server, authn))
+	// The MCP handler is mounted at / and /mcp behind a GET /healthz so
+	// Kubernetes probes can reach the process (see router.go).
+	handler := newRouter(inboundmcp.Handler(server))
 
 	srv := &http.Server{Addr: httpAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 
@@ -145,20 +136,6 @@ func run() error {
 		return srv.Shutdown(shutdownCtx)
 	}
 	return nil
-}
-
-// authKeys reads the bearer keys from the environment via the shared fleet
-// convention: API_READ_KEY grants read scope and API_READWRITE_KEY grants
-// read-write, each falling back to MCP_READ_KEY / MCP_READWRITE_KEY so one
-// Secret can serve both the REST and the MCP surface. If no key is set the
-// server still starts but rejects every request (fail closed) — a missing key
-// must never mean "open to everyone". The keys themselves are never logged.
-func authKeys(logger *slog.Logger) map[string]inboundmcp.Scope {
-	keys := auth.KeysFromEnv(os.Getenv)
-	if len(keys) == 0 {
-		logger.Warn("no API_READ_KEY/API_READWRITE_KEY (or MCP_READ_KEY/MCP_READWRITE_KEY) set; server will reject all requests")
-	}
-	return keys
 }
 
 // version is the service version reported as the OTel service.version

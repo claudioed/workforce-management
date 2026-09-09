@@ -133,32 +133,30 @@ func (d Deps) assignLabor(ctx context.Context, in assignLaborInput) (laborAssign
 // --- registration -------------------------------------------------------------
 
 // registerTools adds every tool to the server, each wrapped so its handler
-// runs inside an OTel span named "mcp.tool <name>" and is gated by the
-// session's scope. Read tools require ScopeRead; the write tool requires
-// ScopeReadWrite.
-func (d Deps) registerTools(server *mcp.Server, scopeOf func(context.Context) Scope) {
+// runs inside an OTel span named "mcp.tool <name>".
+func (d Deps) registerTools(server *mcp.Server) {
 	readOnly := true
 
-	addTool(server, scopeOf, ScopeRead, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_staffing_gap",
 		Description: "Return planned vs active heads for a process path within a building's committed shift plan, and whether it is understaffed. Read-only; surfaces the gap, it does not move anyone.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly},
 	}, d.getStaffingGap)
 
-	addTool(server, scopeOf, ScopeRead, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "propose_path_heads",
 		Description: "Compute the headcount needed to cover a path's charge at a planned rate (ceil(charge/rate)). A pure proposal; it commits nothing and a human still commits the shift plan.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly},
 	}, d.proposePathHeads)
 
-	// Write tool: assigns an associate to a path. Requires the read-write scope
-	// and is annotated destructive (non-read-only, non-idempotent) so a host
-	// can see it changes state before letting a model call it. The domain
-	// invariants (one active assignment per associate; certification match
-	// required) bound the risk of a mistaken call.
+	// Write tool: assigns an associate to a path. Annotated destructive
+	// (non-read-only, non-idempotent) so a host can see it changes state
+	// before letting a model call it. The domain invariants (one active
+	// assignment per associate; certification match required) bound the
+	// risk of a mistaken call.
 	destructive := true
 	notIdempotent := false
-	addTool(server, scopeOf, ScopeReadWrite, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "assign_labor",
 		Description: "Assign an associate to a process path, ending their prior active assignment if any. Rejected if the associate is unknown, lacks the path's required certification, is on break, or the shift has ended.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: notIdempotent},
@@ -166,17 +164,14 @@ func (d Deps) registerTools(server *mcp.Server, scopeOf func(context.Context) Sc
 
 	// Curated read-only data-product tool, registered only when the reports
 	// client is configured.
-	d.registerReportTool(server, scopeOf)
+	d.registerReportTool(server)
 }
 
-// addTool registers one scope-gated tool. It centralises the cross-cutting
-// concerns every tool shares: a span per call, scope enforcement against the
-// tool's required minimum scope, and mapping a handler error onto the span
-// before returning it.
+// addTool registers one tool. It centralises the cross-cutting concerns
+// every tool shares: a span per call and mapping a handler error onto the
+// span before returning it.
 func addTool[In, Out any](
 	server *mcp.Server,
-	scopeOf func(context.Context) Scope,
-	required Scope,
 	tool *mcp.Tool,
 	handle func(context.Context, In) (Out, error),
 ) {
@@ -185,16 +180,9 @@ func addTool[In, Out any](
 		ctx, span := otel.Tracer(tracerName).Start(ctx, "mcp.tool "+tool.Name,
 			trace.WithAttributes(
 				attribute.String("mcp.tool.name", tool.Name),
-				attribute.String("mcp.tool.required_scope", string(required)),
 			),
 		)
 		defer span.End()
-
-		if !scopeAllows(scopeOf(ctx), required) {
-			err := fmt.Errorf("tool %q requires %s scope", tool.Name, required)
-			span.SetStatus(codes.Error, "unauthorized")
-			return nil, zero, err
-		}
 
 		out, err := handle(ctx, in)
 		if err != nil {
