@@ -26,6 +26,7 @@ import (
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/kafkacatalog"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/laborperformance"
+	"github.com/claudioed/workforce-management/internal/adapters/outbound/laborperformancecache"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/postgres"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/workforce-management/internal/application/ports"
@@ -201,7 +202,54 @@ func run() error {
 	// transaction is still correct, so the UnitOfWork is wired unconditionally.
 	uow := postgres.NewUnitOfWork(pool)
 
-	measuredRate := buildMeasuredRateClient(envOrDefault("LABOR_PERFORMANCE_MODE", "permissive"), os.Getenv("LABOR_PERFORMANCE_BASE_URL"), logger)
+	// LABOR_PERFORMANCE_MODE selects the MeasuredRateClient
+	// implementation (http|kafka-cache|permissive, default
+	// "permissive"). "kafka-cache" replaces the synchronous HTTP call
+	// with a local, in-memory read model fed by labor-performance's
+	// warehouse.labor-performance.events integration topic (ADR 0013 on
+	// labor-performance's side; see this repo's own ADR for the
+	// consuming-side rationale) -- mirroring EXACTLY how
+	// PATH_CATALOGUE_SOURCE=kafka starts and waits for
+	// internal/adapters/outbound/kafkacatalog's consumer above: start
+	// the Run goroutine BEFORE WaitReady is called, so something is
+	// always consuming while this process waits (otherwise a guaranteed
+	// deadlock until WaitReadyTimeout).
+	var measuredRate ports.MeasuredRateClient
+	var kafkaMeasuredRate *laborperformancecache.Consumer
+	rateConsumerCtx, cancelRateConsumer := context.WithCancel(context.Background())
+	defer cancelRateConsumer()
+
+	switch envOrDefault("LABOR_PERFORMANCE_MODE", "permissive") {
+	case "kafka-cache":
+		kafkaBrokersCSV := os.Getenv("KAFKA_BROKERS")
+		if kafkaBrokersCSV == "" {
+			return fmt.Errorf("LABOR_PERFORMANCE_MODE=kafka-cache requires KAFKA_BROKERS to be set")
+		}
+		var err error
+		kafkaMeasuredRate, err = laborperformancecache.NewConsumer(ctx, strings.Split(kafkaBrokersCSV, ","), logger)
+		if err != nil {
+			return fmt.Errorf("failed to start the Kafka-sourced labor-performance measured rate cache: %w", err)
+		}
+		logger.Info("labor-performance measured rate client configured", "mode", "kafka-cache", "topic", laborperformancecache.Topic)
+		go func() {
+			logger.Info("labor-performance measured rate cache consumer running", "topic", laborperformancecache.Topic)
+			if err := kafkaMeasuredRate.Run(rateConsumerCtx); err != nil {
+				logger.Error("labor-performance measured rate cache consumer stopped", "error", err)
+			}
+		}()
+
+		logger.Info("waiting for the labor-performance measured rate cache to replay its initial history before accepting traffic")
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), laborperformancecache.WaitReadyTimeout)
+		err = kafkaMeasuredRate.WaitReady(waitCtx)
+		waitCancel()
+		if err != nil {
+			return fmt.Errorf("labor-performance measured rate cache did not become ready within %s: %w", laborperformancecache.WaitReadyTimeout, err)
+		}
+		logger.Info("labor-performance measured rate cache is ready")
+		measuredRate = kafkaMeasuredRate
+	default:
+		measuredRate = buildMeasuredRateClient(envOrDefault("LABOR_PERFORMANCE_MODE", "permissive"), os.Getenv("LABOR_PERFORMANCE_BASE_URL"), logger)
+	}
 	installedCapacity := buildInstalledCapacityClient(envOrDefault("INSTALLED_CAPACITY_MODE", "permissive"), os.Getenv("FULFILLMENT_EXECUTION_BASE_URL"), logger)
 
 	handler := &inbound.Handler{
@@ -259,6 +307,10 @@ func run() error {
 		cancelCatalogueConsumer()
 		if kafkaCatalogue != nil {
 			_ = kafkaCatalogue.Close()
+		}
+		cancelRateConsumer()
+		if kafkaMeasuredRate != nil {
+			_ = kafkaMeasuredRate.Close()
 		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -352,7 +404,12 @@ func envOrDefault(key, def string) string {
 // buildMeasuredRateClient selects a ports.MeasuredRateClient via mode
 // (http|permissive), defaulting to "permissive" so unit tests, local dev,
 // and CI never reach the network unless explicitly opted in -- the same
-// pattern order-management uses for INVENTORY_STORAGE_MODE.
+// pattern order-management uses for INVENTORY_STORAGE_MODE. A third mode,
+// "kafka-cache", is handled separately in run() (mirroring
+// PATH_CATALOGUE_SOURCE=kafka's wiring) because it needs a consumer
+// goroutine and a WaitReady gate before this service is ready to serve
+// traffic -- this function stays scoped to the two modes that construct
+// synchronously with no startup ordering to manage.
 func buildMeasuredRateClient(mode, baseURL string, logger *slog.Logger) ports.MeasuredRateClient {
 	if mode != "http" {
 		logger.Info("labor-performance measured rate client configured", "mode", "permissive",
