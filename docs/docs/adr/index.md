@@ -98,3 +98,4 @@ quietly delete the old one — the fact that it was tried is itself information.
 | [0016](./0016-transactional-outbox.md) | Transactional outbox feeding both Kafka topics from one table | Accepted |
 | [0017](./0017-adopt-fleet-rest-identity.md) | Adopt the fleet REST identity — static bearer keys with read/read-write scopes | Superseded by [0018](./0018-remove-fleet-rest-identity.md) |
 | [0018](./0018-remove-fleet-rest-identity.md) | Remove the fleet REST identity layer (revert ADR-0017) | Accepted |
+| [0019](./0019-labor-performance-cache-consumer.md) | Replace the synchronous labor-performance MeasuredRateClient with an event-fed local cache | Accepted |

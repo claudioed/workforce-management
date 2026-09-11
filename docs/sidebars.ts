@@ -105,6 +105,7 @@ const sidebars: SidebarsConfig = {
         'adr/0016-transactional-outbox',
         'adr/0017-adopt-fleet-rest-identity',
         'adr/0018-remove-fleet-rest-identity',
+        'adr/0019-labor-performance-cache-consumer',
       ],
     },
   ],
