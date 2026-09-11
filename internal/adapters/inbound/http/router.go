@@ -201,7 +201,7 @@ func (h *Handler) proposePathPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	heads, resolvedRate, rateSource, err := h.ProposePathPlan.Execute(r.Context(), req.BuildingId, pathId, req.Charge, req.PlannedRate)
+	heads, resolvedRate, rateSource, trimReason, err := h.ProposePathPlan.Execute(r.Context(), req.BuildingId, pathId, req.Charge, req.PlannedRate)
 	if err != nil {
 		writeError(w, r, statusFor(err), err)
 		return
@@ -211,6 +211,7 @@ func (h *Handler) proposePathPlan(w http.ResponseWriter, r *http.Request) {
 		ProposedHeads: heads,
 		ResolvedRate:  resolvedRate,
 		RateSource:    rateSource,
+		TrimReason:    trimReason,
 	})
 }
 
