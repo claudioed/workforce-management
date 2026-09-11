@@ -54,6 +54,29 @@
 // is a wholly separate, unrelated field this cache does not use at all.
 // Every TaskPerformanceRecorded message updates its TaskType's running
 // mean.
+//
+// # Idle-share strategy
+//
+// labor-performance's TaskPerformanceRecorded event additionally carries
+// IdleSecondsBefore (wire key idle_seconds_before), a *int64 that is nil
+// when the associate's between-task idle gap was not observed: the
+// task's first-ever completion for that associate, a negative/zero gap
+// from Kafka reordering, or an empty AssociateId (a robot station). This
+// cache tracks a running idle share per TaskType using the EXACT SAME
+// sum+count/running-totals style as MeanActualSeconds above, for the
+// same reasons (small fixed TaskType cardinality, no eviction
+// complexity, "what is the measured idle share" not "was the last task
+// idle"): it keeps two incremental sums per TaskType, sum(idle) and
+// sum(actual), and reports idleShare = sum(idle) / (sum(idle) +
+// sum(actual)) -- the fraction of clocked time (task-doing time plus
+// idle waiting time) that was idle. A message with a nil
+// idle_seconds_before contributes to sum(actual) only (via
+// applyTaskPerformanceRecorded's existing mean update) -- it is
+// correctly absent from the idle numerator, since "not observed" must
+// never be coerced into "zero idle". A TaskType with actual_seconds
+// data but no observed idle data yet reports ErrIdleShareUnavailable
+// from IdleSharePct, exactly mirroring MeanActualSeconds's own
+// no-data-yet contract for MeanActualSeconds/ErrMeasuredRateUnavailable.
 package laborperformancecache
 
 import (
@@ -101,14 +124,18 @@ type envelope struct {
 // taskPerformanceData is the payload shape for TaskPerformanceRecorded
 // on Topic (ADR 0013's documented wire contract). EfficiencyPct is
 // nullable and unused by this cache; ActualSeconds is always present
-// and is the only field the running mean is built from.
+// and is the only field the running mean is built from. IdleSecondsBefore
+// is nullable ("not observed" -- see the package doc comment's Idle-share
+// strategy section); it feeds the running idle-share totals only when
+// non-nil.
 type taskPerformanceData struct {
-	TaskId        string   `json:"task_id"`
-	AssociateId   string   `json:"associate_id"`
-	TaskType      string   `json:"task_type"`
-	EfficiencyPct *float64 `json:"efficiency_pct"`
-	ActualSeconds int64    `json:"actual_seconds"`
-	CompletedAt   string   `json:"completed_at"`
+	TaskId            string   `json:"task_id"`
+	AssociateId       string   `json:"associate_id"`
+	TaskType          string   `json:"task_type"`
+	EfficiencyPct     *float64 `json:"efficiency_pct"`
+	ActualSeconds     int64    `json:"actual_seconds"`
+	IdleSecondsBefore *int64   `json:"idle_seconds_before"`
+	CompletedAt       string   `json:"completed_at"`
 }
 
 // Reader is the subset of *kafkago.Reader this Consumer needs, so tests
@@ -119,19 +146,22 @@ type Reader interface {
 }
 
 // Consumer maintains a local, per-TaskType running mean of
-// actual_seconds by replaying Topic from its earliest offset (a fresh,
-// per-process consumer group) and applying every TaskPerformanceRecorded
-// event as it arrives. It satisfies ports.MeasuredRateClient via
-// MeanActualSeconds, delegating to the current in-memory running means.
+// actual_seconds and a running idle share by replaying Topic from its
+// earliest offset (a fresh, per-process consumer group) and applying
+// every TaskPerformanceRecorded event as it arrives. It satisfies
+// ports.MeasuredRateClient via MeanActualSeconds and
+// ports.IdleShareClient via IdleSharePct, delegating to the current
+// in-memory running totals.
 type Consumer struct {
 	Reader Reader
 	Logger *slog.Logger
 
-	mu      sync.RWMutex
-	totals  map[string]runningMean
-	ready   bool
-	readyCh chan struct{}
-	target  targetOffsets
+	mu         sync.RWMutex
+	totals     map[string]runningMean
+	idleTotals map[string]idleShareTotals
+	ready      bool
+	readyCh    chan struct{}
+	target     targetOffsets
 }
 
 // runningMean tracks an incremental sum+count for one TaskType, so
@@ -146,6 +176,36 @@ func (m runningMean) mean() (float64, bool) {
 		return 0, false
 	}
 	return m.sum / float64(m.count), true
+}
+
+// idleShareTotals tracks the two running sums the idle-share ratio is
+// built from: idleSeconds (numerator, fed only by non-nil
+// idle_seconds_before) and actualSeconds (denominator half, fed by
+// every message regardless of idle observability). observed reports
+// whether at least one message has ever contributed a non-nil
+// idle_seconds_before for this TaskType -- a TaskType that only ever
+// sees actual_seconds (no idle observation yet) must report
+// ErrIdleShareUnavailable, not a fabricated 0 share.
+type idleShareTotals struct {
+	idleSeconds   float64
+	actualSeconds float64
+	observed      bool
+}
+
+// share computes idleSeconds / (idleSeconds + actualSeconds), the
+// fraction of this TaskType's clocked time (task-doing plus idle
+// waiting) that was idle. ok is false when no idle observation has ever
+// been recorded for this TaskType, or the two sums are both zero
+// (nothing to divide).
+func (t idleShareTotals) share() (float64, bool) {
+	if !t.observed {
+		return 0, false
+	}
+	denom := t.idleSeconds + t.actualSeconds
+	if denom <= 0 {
+		return 0, false
+	}
+	return t.idleSeconds / denom, true
 }
 
 // targetOffsets is the per-partition "caught up" watermark captured once
@@ -188,11 +248,12 @@ func NewConsumerForTopic(ctx context.Context, brokers []string, topic string, lo
 	})
 
 	c := &Consumer{
-		Reader:  reader,
-		Logger:  logger,
-		totals:  make(map[string]runningMean),
-		readyCh: make(chan struct{}),
-		target:  target,
+		Reader:     reader,
+		Logger:     logger,
+		totals:     make(map[string]runningMean),
+		idleTotals: make(map[string]idleShareTotals),
+		readyCh:    make(chan struct{}),
+		target:     target,
 	}
 	if len(target) == 0 {
 		// The topic has no partitions with any messages yet (a brand
@@ -344,6 +405,34 @@ func (c *Consumer) MeanActualSeconds(_ context.Context, pathId shared.PathId) (f
 	return mean, nil
 }
 
+// IdleSharePct satisfies ports.IdleShareClient against this consumer's
+// current in-memory running idle-share totals. Returns
+// ports.ErrIdleShareUnavailable (never any other error) on ANY failure
+// to produce a real value -- pathId has no TaskType counterpart, or no
+// TaskPerformanceRecorded message carrying a non-nil idle_seconds_before
+// has been observed yet for that TaskType -- mirroring
+// MeanActualSeconds's fail-open contract exactly, so both GetStaffingGap
+// and ProposePathPlan can treat "no idle signal" uniformly regardless of
+// why.
+func (c *Consumer) IdleSharePct(_ context.Context, pathId shared.PathId) (float64, error) {
+	taskType, ok := taskTypeForPathId(pathId)
+	if !ok {
+		return 0, fmt.Errorf("%w: path %q has no labor-performance task type", ports.ErrIdleShareUnavailable, pathId)
+	}
+
+	c.mu.RLock()
+	totals, tracked := c.idleTotals[taskType]
+	c.mu.RUnlock()
+	if !tracked {
+		return 0, fmt.Errorf("%w: no idle share observed yet for task type %q", ports.ErrIdleShareUnavailable, taskType)
+	}
+	share, ok := totals.share()
+	if !ok {
+		return 0, fmt.Errorf("%w: no idle share observed yet for task type %q", ports.ErrIdleShareUnavailable, taskType)
+	}
+	return share, nil
+}
+
 // Run consumes Topic until ctx is cancelled or the reader returns a
 // fatal error. A handling error is logged and the loop continues, so one
 // malformed message cannot wedge this consumer.
@@ -411,11 +500,16 @@ func (c *Consumer) handle(msg kafkago.Message) error {
 }
 
 // applyTaskPerformanceRecorded folds one task's actual_seconds into its
-// TaskType's running mean. EfficiencyPct is intentionally never
-// inspected: a null efficiency_pct means "unscorable", not "no duration
-// data" -- actual_seconds is always present per the wire contract, so
-// every message updates the mean regardless of whether the task was
-// scorable.
+// TaskType's running mean, and -- when idle_seconds_before is non-nil --
+// its idle-share totals. EfficiencyPct is intentionally never inspected:
+// a null efficiency_pct means "unscorable", not "no duration data" --
+// actual_seconds is always present per the wire contract, so every
+// message updates the mean regardless of whether the task was scorable.
+// A nil IdleSecondsBefore still contributes actual_seconds to the
+// idle-share denominator (via the totals.actualSeconds update below) but
+// leaves totals.observed and the numerator untouched -- "not observed"
+// is never coerced into "zero idle" (see the package doc comment's
+// Idle-share strategy section).
 func (c *Consumer) applyTaskPerformanceRecorded(data taskPerformanceData) {
 	taskType := strings.ToUpper(data.TaskType)
 	if taskType == "" {
@@ -427,7 +521,22 @@ func (c *Consumer) applyTaskPerformanceRecorded(data taskPerformanceData) {
 	t.sum += float64(data.ActualSeconds)
 	t.count++
 	c.totals[taskType] = t
+
+	idle := c.idleTotals[taskType]
+	idle.actualSeconds += float64(data.ActualSeconds)
+	if data.IdleSecondsBefore != nil {
+		idle.idleSeconds += float64(*data.IdleSecondsBefore)
+		idle.observed = true
+	}
+	c.idleTotals[taskType] = idle
 }
+
+// Compile-time assertions that Consumer satisfies both outbound ports
+// it backs in kafka-cache mode.
+var (
+	_ ports.MeasuredRateClient = (*Consumer)(nil)
+	_ ports.IdleShareClient    = (*Consumer)(nil)
+)
 
 // WaitReadyTimeout bounds how long the composition root waits for the
 // initial replay before giving up and failing startup outright.

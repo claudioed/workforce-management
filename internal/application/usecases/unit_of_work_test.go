@@ -412,14 +412,14 @@ func TestProposePathPlan_PublishRunsInsideOneUnitOfWork(t *testing.T) {
 	uow := &recordingUnitOfWork{}
 	uc := &ProposePathPlan{Events: pub, Clock: f.clock, UnitOfWork: uow}
 
-	if _, _, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 10); err != nil {
+	if _, _, _, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 10); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	assertOneCommittedScope(t, uow, pub)
 
 	uow = &recordingUnitOfWork{}
 	uc = &ProposePathPlan{Events: &scopedPublisher{err: errBoom}, Clock: f.clock, UnitOfWork: uow}
-	if _, _, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 10); !errors.Is(err, errBoom) {
+	if _, _, _, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 10); !errors.Is(err, errBoom) {
 		t.Fatalf("expected errBoom, got %v", err)
 	}
 	if uow.rolledBack != 1 {

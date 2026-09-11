@@ -215,6 +215,7 @@ func run() error {
 	// always consuming while this process waits (otherwise a guaranteed
 	// deadlock until WaitReadyTimeout).
 	var measuredRate ports.MeasuredRateClient
+	var idleShare ports.IdleShareClient
 	var kafkaMeasuredRate *laborperformancecache.Consumer
 	rateConsumerCtx, cancelRateConsumer := context.WithCancel(context.Background())
 	defer cancelRateConsumer()
@@ -247,20 +248,29 @@ func run() error {
 		}
 		logger.Info("labor-performance measured rate cache is ready")
 		measuredRate = kafkaMeasuredRate
+		// The SAME Consumer instance also satisfies ports.IdleShareClient
+		// (idleness-as-staffing-signal): only kafka-cache mode has a
+		// per-message idle_seconds_before stream to observe, so http and
+		// permissive leave idleShare nil below -- GetStaffingGap and
+		// ProposePathPlan both already treat a nil IdleShareClient as
+		// "no signal", the same fail-open discipline as every other
+		// *_MODE default in this fleet.
+		idleShare = kafkaMeasuredRate
 	default:
 		measuredRate = buildMeasuredRateClient(envOrDefault("LABOR_PERFORMANCE_MODE", "permissive"), os.Getenv("LABOR_PERFORMANCE_BASE_URL"), logger)
 	}
 	installedCapacity := buildInstalledCapacityClient(envOrDefault("INSTALLED_CAPACITY_MODE", "permissive"), os.Getenv("FULFILLMENT_EXECUTION_BASE_URL"), logger)
+	idleShareTrimThreshold := envFloatOrDefault("IDLE_SHARE_TRIM_THRESHOLD", usecases.DefaultIdleShareTrimThreshold)
 
 	handler := &inbound.Handler{
 		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: publisher, Clock: sysClock, UnitOfWork: uow},
 		CertifyAssociate:    &usecases.CertifyAssociate{Associates: associates, Events: publisher, Clock: sysClock, UnitOfWork: uow},
-		ProposePathPlan:     &usecases.ProposePathPlan{Events: publisher, Clock: sysClock, MeasuredRate: measuredRate, UnitOfWork: uow},
+		ProposePathPlan:     &usecases.ProposePathPlan{Events: publisher, Clock: sysClock, MeasuredRate: measuredRate, IdleShare: idleShare, IdleShareTrimThreshold: idleShareTrimThreshold, UnitOfWork: uow},
 		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: publisher, Clock: sysClock, InstalledCapacity: installedCapacity, MaxHoursPerShift: maxHoursPerShift, UnitOfWork: uow},
 		AssignLabor:         &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift, UnitOfWork: uow},
 		StartBreak:          &usecases.StartBreak{Associates: associates, Events: publisher, Clock: sysClock, UnitOfWork: uow},
 		EndBreak:            &usecases.EndBreak{Associates: associates, Events: publisher, Clock: sysClock, UnitOfWork: uow},
-		GetStaffingGap:      &usecases.GetStaffingGap{ShiftPlans: shiftPlans, Assignments: assignments, Events: publisher, Clock: sysClock, UnitOfWork: uow},
+		GetStaffingGap:      &usecases.GetStaffingGap{ShiftPlans: shiftPlans, Assignments: assignments, Events: publisher, Clock: sysClock, IdleShare: idleShare, UnitOfWork: uow},
 		EndAssociateShift:   &usecases.EndAssociateShift{Associates: associates, Assignments: assignments, Events: publisher, Clock: sysClock, MaxHoursPerShift: maxHoursPerShift, UnitOfWork: uow},
 		Catalogue:           catalogue,
 	}

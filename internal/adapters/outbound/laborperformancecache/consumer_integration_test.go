@@ -47,9 +47,12 @@ func TestNewConsumerForTopic_ReplaysTaskPerformanceRecordedAndComputesMean(t *te
 	// Two TaskPerformanceRecorded events for PICK (mean of 40 and 60 is
 	// 50), plus one with a null efficiency_pct that must still count
 	// toward the mean, exactly per the wire contract documented in
-	// ADR 0013.
+	// ADR 0013. The first carries a real idle_seconds_before (20); the
+	// second omits idle_seconds_before entirely (absent key decodes to
+	// nil, same as an explicit JSON null) -- it must contribute to the
+	// idle-share denominator (actual_seconds) only, never the numerator.
 	messages := []kafkago.Message{
-		{Value: []byte(`{"event_id":"evt-1","event_type":"TaskPerformanceRecorded","occurred_at":"2026-09-05T09:30:00Z","source":"labor-performance","data":{"task_id":"task-1","associate_id":"assoc-1","task_type":"PICK","efficiency_pct":91.2,"actual_seconds":40,"completed_at":"2026-09-05T09:30:00Z"}}`)},
+		{Value: []byte(`{"event_id":"evt-1","event_type":"TaskPerformanceRecorded","occurred_at":"2026-09-05T09:30:00Z","source":"labor-performance","data":{"task_id":"task-1","associate_id":"assoc-1","task_type":"PICK","efficiency_pct":91.2,"actual_seconds":40,"idle_seconds_before":20,"completed_at":"2026-09-05T09:30:00Z"}}`)},
 		{Value: []byte(`{"event_id":"evt-2","event_type":"TaskPerformanceRecorded","occurred_at":"2026-09-05T10:00:00Z","source":"labor-performance","data":{"task_id":"task-2","associate_id":"","task_type":"PICK","efficiency_pct":null,"actual_seconds":60,"completed_at":"2026-09-05T10:00:00Z"}}`)},
 	}
 	if err := writer.WriteMessages(ctx, messages...); err != nil {
@@ -80,6 +83,20 @@ func TestNewConsumerForTopic_ReplaysTaskPerformanceRecordedAndComputesMean(t *te
 		runCancel()
 		_ = consumer.Close()
 		t.Fatalf("mean = %v, want 50 (null efficiency_pct must still count toward the mean)", got)
+	}
+
+	// idle=20 (only evt-1 observed), actual=40+60=100 -> share = 20/120.
+	idleShare, err := consumer.IdleSharePct(ctx, shared.PathId("pick"))
+	if err != nil {
+		runCancel()
+		_ = consumer.Close()
+		t.Fatalf("IdleSharePct: %v", err)
+	}
+	wantIdleShare := 20.0 / 120.0
+	if idleShare != wantIdleShare {
+		runCancel()
+		_ = consumer.Close()
+		t.Fatalf("idle share = %v, want %v (evt-2's absent idle_seconds_before must contribute actual_seconds only)", idleShare, wantIdleShare)
 	}
 
 	runCancel()

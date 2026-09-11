@@ -26,6 +26,7 @@ import (
 	inboundhttp "github.com/claudioed/workforce-management/internal/adapters/inbound/http"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/events"
 	"github.com/claudioed/workforce-management/internal/adapters/outbound/memory"
+	"github.com/claudioed/workforce-management/internal/application/ports"
 	"github.com/claudioed/workforce-management/internal/application/usecases"
 	"github.com/claudioed/workforce-management/internal/domain/shared"
 )
@@ -60,8 +61,10 @@ func (unlimitedInstalledCapacity) InstalledCapacity(_ context.Context, _ shared.
 
 // newServer builds a fully wired composition of the service backed by
 // in-memory adapters and serves it over HTTP. Each scenario gets its own,
-// so no state leaks between scenarios.
-func newServer() *httptest.Server {
+// so no state leaks between scenarios. idleShare wires
+// usecases.ProposePathPlan's optional idle-share trim signal (nil is the
+// default, permissive configuration every other scenario exercises).
+func newServer(idleShare ports.IdleShareClient) *httptest.Server {
 	associates := memory.NewAssociateRepo()
 	shiftPlans := memory.NewShiftPlanRepo()
 	assignments := memory.NewAssignmentRepo()
@@ -71,16 +74,25 @@ func newServer() *httptest.Server {
 	handler := &inboundhttp.Handler{
 		StartAssociateShift: &usecases.StartAssociateShift{Associates: associates, Events: pub, Clock: clock},
 		CertifyAssociate:    &usecases.CertifyAssociate{Associates: associates, Events: pub, Clock: clock},
-		ProposePathPlan:     &usecases.ProposePathPlan{Events: pub, Clock: clock},
+		ProposePathPlan:     &usecases.ProposePathPlan{Events: pub, Clock: clock, IdleShare: idleShare},
 		CommitShiftPlan:     &usecases.CommitShiftPlan{ShiftPlans: shiftPlans, Events: pub, Clock: clock, InstalledCapacity: unlimitedInstalledCapacity{}, MaxHoursPerShift: maxHoursPerShift},
 		AssignLabor:         &usecases.AssignLabor{Associates: associates, Assignments: assignments, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
 		StartBreak:          &usecases.StartBreak{Associates: associates, Events: pub, Clock: clock},
 		EndBreak:            &usecases.EndBreak{Associates: associates, Events: pub, Clock: clock},
-		GetStaffingGap:      &usecases.GetStaffingGap{ShiftPlans: shiftPlans, Assignments: assignments, Events: pub, Clock: clock},
+		GetStaffingGap:      &usecases.GetStaffingGap{ShiftPlans: shiftPlans, Assignments: assignments, Events: pub, Clock: clock, IdleShare: idleShare},
 		EndAssociateShift:   &usecases.EndAssociateShift{Associates: associates, Assignments: assignments, Events: pub, Clock: clock, MaxHoursPerShift: maxHoursPerShift},
 	}
 
 	return httptest.NewServer(inboundhttp.NewRouter(handler, slog.New(slog.NewTextHandler(io.Discard, nil)), ""))
+}
+
+// fixedIdleShareClient is a BDD-suite test double for
+// ports.IdleShareClient: it reports the same share for every path,
+// which is all the "high idle share trims the proposal" scenario needs.
+type fixedIdleShareClient struct{ share float64 }
+
+func (f fixedIdleShareClient) IdleSharePct(_ context.Context, _ shared.PathId) (float64, error) {
+	return f.share, nil
 }
 
 // world is the per-scenario state: the server under test plus the most
@@ -96,7 +108,7 @@ type world struct {
 
 func (w *world) reset() {
 	w.stop()
-	w.server = newServer()
+	w.server = newServer(nil)
 	w.client = w.server.Client()
 	w.lastStatus = 0
 	w.lastContentType = ""
@@ -436,6 +448,63 @@ func (w *world) pathIsFlaggedUnderstaffed(pathId string, plannedHeads, activeHea
 	return nil
 }
 
+// --- idleness-as-staffing-signal steps --------------------------------------
+
+// observedIdleShareForPath rebuilds the server wired with a
+// fixedIdleShareClient reporting share for every path -- this scenario
+// needs the idle-share signal wired BEFORE the plan proposal request, so
+// it replaces w.reset()'s default nil wiring rather than mutating the
+// already-running server's use case in place.
+func (w *world) observedIdleShareForPath(_, shareStr string) error {
+	var share float64
+	if _, err := fmt.Sscanf(shareStr, "%g", &share); err != nil {
+		return fmt.Errorf("idle share %q: %w", shareStr, err)
+	}
+	w.stop()
+	w.server = newServer(fixedIdleShareClient{share: share})
+	w.client = w.server.Client()
+	return nil
+}
+
+type proposePathPlanBody struct {
+	BuildingId  string  `json:"buildingId"`
+	Charge      float64 `json:"charge"`
+	PlannedRate float64 `json:"plannedRate"`
+}
+
+type proposePathPlanResult struct {
+	PathId        string  `json:"pathId"`
+	ProposedHeads int     `json:"proposedHeads"`
+	ResolvedRate  float64 `json:"resolvedRate"`
+	RateSource    string  `json:"rateSource"`
+	TrimReason    string  `json:"trimReason"`
+}
+
+func (w *world) pathPlanIsProposed(ctx context.Context, pathId, buildingId string, charge, plannedRate float64) error {
+	return w.do(ctx, http.MethodPost, "/paths/"+pathId+"/plan/propose", proposePathPlanBody{
+		BuildingId:  buildingId,
+		Charge:      charge,
+		PlannedRate: plannedRate,
+	})
+}
+
+func (w *world) proposedHeadsAreTrimmedWithNonEmptyTrimReason(wantHeads int) error {
+	if err := w.expectStatus(http.StatusOK); err != nil {
+		return err
+	}
+	var resp proposePathPlanResult
+	if err := w.decodeLast(&resp); err != nil {
+		return err
+	}
+	if resp.ProposedHeads != wantHeads {
+		return fmt.Errorf("expected %d proposed heads after trim, got %d", wantHeads, resp.ProposedHeads)
+	}
+	if resp.TrimReason == "" {
+		return fmt.Errorf("expected a non-empty trimReason when a trim was applied")
+	}
+	return nil
+}
+
 // InitializeScenario registers the hooks and step definitions for every
 // scenario. A fresh server (and therefore fresh in-memory repositories) is
 // built before each scenario so scenarios stay independent.
@@ -457,6 +526,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^associate "([^"]*)" is certified for "([^"]*)"$`, w.associateIsCertifiedFor)
 	sc.Step(`^a ShiftPlan is committed for building "([^"]*)" shift "([^"]*)" with lines:$`, w.shiftPlanIsCommitted)
 	sc.Step(`^associate "([^"]*)" has started a break$`, w.associateHasStartedABreak)
+	sc.Step(`^the observed idle share for path "([^"]*)" is ([\d.]+)$`, w.observedIdleShareForPath)
 
 	// When
 	sc.Step(`^committing a ShiftPlan for building "([^"]*)" shift "([^"]*)" with lines:$`, w.commitShiftPlan)
@@ -464,6 +534,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^associate "([^"]*)" starts a break$`, w.associateStartsABreak)
 	sc.Step(`^associate "([^"]*)" ends the break$`, w.associateEndsTheBreak)
 	sc.Step(`^the staffing gap for path "([^"]*)" is requested for building "([^"]*)" shift "([^"]*)"$`, w.staffingGapIsRequested)
+	sc.Step(`^a path plan is proposed for path "([^"]*)" building "([^"]*)" with charge (\d+) and planned rate (\d+)$`, w.pathPlanIsProposed)
 
 	// Then
 	sc.Step(`^the ShiftPlan commit succeeds with (\d+) planned heads on path "([^"]*)"$`, w.shiftPlanCommitSucceeded)
@@ -474,6 +545,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^the LaborAssignment for associate "([^"]*)" has exactly one ACTIVE assignment, on path "([^"]*)"$`, w.laborAssignmentHasExactlyOneActiveAssignment)
 	sc.Step(`^path "([^"]*)" has (\d+) active heads? in building "([^"]*)" shift "([^"]*)"$`, w.pathHasActiveHeads)
 	sc.Step(`^path "([^"]*)" is flagged PathUnderstaffed with (\d+) planned heads and (\d+) active heads?$`, w.pathIsFlaggedUnderstaffed)
+	sc.Step(`^the proposed heads are trimmed to (\d+) with a non-empty trim reason$`, w.proposedHeadsAreTrimmedWithNonEmptyTrimReason)
 }
 
 // TestFeatures runs every Gherkin feature under features/ as a Go test.

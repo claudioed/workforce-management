@@ -55,10 +55,11 @@ func envelopeMsg(t *testing.T, partition int, offset int64, eventType string, da
 
 func newTestConsumer(reader Reader, target targetOffsets) *Consumer {
 	c := &Consumer{
-		Reader:  reader,
-		totals:  make(map[string]runningMean),
-		readyCh: make(chan struct{}),
-		target:  target,
+		Reader:     reader,
+		totals:     make(map[string]runningMean),
+		idleTotals: make(map[string]idleShareTotals),
+		readyCh:    make(chan struct{}),
+		target:     target,
 	}
 	if len(target) == 0 {
 		c.markReady()
@@ -260,5 +261,101 @@ func TestConsumer_UnattributedTask_EmptyAssociateId_StillUpdatesMean(t *testing.
 	}
 	if got != 15 {
 		t.Fatalf("mean = %v, want 15", got)
+	}
+}
+
+// TestIdleSharePct_NilIdleSecondsBefore_ContributesActualOnlyAndStaysUnavailable
+// is the key idle-share contract test: a nil idle_seconds_before must
+// never be coerced into a zero idle contribution -- it feeds the
+// denominator (actual_seconds) but leaves the TaskType unavailable until
+// at least one message carries a real observation.
+func TestIdleSharePct_NilIdleSecondsBefore_ContributesActualOnlyAndStaysUnavailable(t *testing.T) {
+	reader := &fakeReader{
+		messages: []kafkago.Message{
+			envelopeMsg(t, 0, 0, eventTypeTaskPerformanceRecorded, taskPerformanceData{TaskId: "t1", TaskType: "PICK", ActualSeconds: 40, IdleSecondsBefore: nil}),
+		},
+	}
+	c := newTestConsumer(reader, targetOffsets{0: 1})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	if err := c.WaitReady(ctx); err != nil {
+		t.Fatalf("expected Ready before timeout, got: %v", err)
+	}
+
+	if _, err := c.IdleSharePct(context.Background(), shared.PathId("pick")); !errors.Is(err, ports.ErrIdleShareUnavailable) {
+		t.Fatalf("err = %v, want ErrIdleShareUnavailable (nil idle_seconds_before must never fabricate a 0 share)", err)
+	}
+	// The mean must still reflect the message's actual_seconds.
+	mean, err := c.MeanActualSeconds(context.Background(), shared.PathId("pick"))
+	if err != nil {
+		t.Fatalf("expected MeanActualSeconds to succeed, got: %v", err)
+	}
+	if mean != 40 {
+		t.Fatalf("mean = %v, want 40", mean)
+	}
+}
+
+// TestIdleSharePct_ComputesRunningShareAcrossMessages covers the core
+// sum+count-style ratio: idleSeconds / (idleSeconds + actualSeconds),
+// accumulated across multiple messages, including one with a nil
+// idle_seconds_before that must contribute to the denominator (via
+// actual_seconds) but not the numerator.
+func TestIdleSharePct_ComputesRunningShareAcrossMessages(t *testing.T) {
+	idle1 := int64(10)
+	idle2 := int64(30)
+	reader := &fakeReader{
+		messages: []kafkago.Message{
+			// idle=10, actual=40 -> running idle=10, actual=40
+			envelopeMsg(t, 0, 0, eventTypeTaskPerformanceRecorded, taskPerformanceData{TaskId: "t1", TaskType: "PACK", ActualSeconds: 40, IdleSecondsBefore: &idle1}),
+			// nil idle -> actual-only contribution: running idle=10, actual=60
+			envelopeMsg(t, 0, 1, eventTypeTaskPerformanceRecorded, taskPerformanceData{TaskId: "t2", TaskType: "PACK", ActualSeconds: 20, IdleSecondsBefore: nil}),
+			// idle=30, actual=30 -> running idle=40, actual=90
+			envelopeMsg(t, 0, 2, eventTypeTaskPerformanceRecorded, taskPerformanceData{TaskId: "t3", TaskType: "PACK", ActualSeconds: 30, IdleSecondsBefore: &idle2}),
+		},
+	}
+	c := newTestConsumer(reader, targetOffsets{0: 3})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	if err := c.WaitReady(ctx); err != nil {
+		t.Fatalf("expected Ready before timeout, got: %v", err)
+	}
+
+	got, err := c.IdleSharePct(context.Background(), shared.PathId("pack"))
+	if err != nil {
+		t.Fatalf("expected IdleSharePct to succeed, got: %v", err)
+	}
+	// idle=40, actual=90 -> share = 40/(40+90) = 40/130
+	want := 40.0 / 130.0
+	if got != want {
+		t.Fatalf("idle share = %v, want %v", got, want)
+	}
+}
+
+// TestIdleSharePct_PathWithNoTaskTypeCounterpart_ReturnsUnavailable
+// mirrors TestMeanActualSeconds_PathWithNoTaskTypeCounterpart_ReturnsUnavailable
+// for the idle-share port.
+func TestIdleSharePct_PathWithNoTaskTypeCounterpart_ReturnsUnavailable(t *testing.T) {
+	c := newTestConsumer(&fakeReader{}, targetOffsets{})
+	for _, pathId := range []string{"stow", "hazmat", "unknown-path"} {
+		_, err := c.IdleSharePct(context.Background(), shared.PathId(pathId))
+		if !errors.Is(err, ports.ErrIdleShareUnavailable) {
+			t.Fatalf("path %q: err = %v, want ErrIdleShareUnavailable", pathId, err)
+		}
+	}
+}
+
+// TestIdleSharePct_NoDataObservedYet_ReturnsUnavailable mirrors
+// TestMeanActualSeconds_NoDataObservedYet_ReturnsUnavailable for the
+// idle-share port.
+func TestIdleSharePct_NoDataObservedYet_ReturnsUnavailable(t *testing.T) {
+	c := newTestConsumer(&fakeReader{}, targetOffsets{})
+	if _, err := c.IdleSharePct(context.Background(), shared.PathId("pick")); !errors.Is(err, ports.ErrIdleShareUnavailable) {
+		t.Fatalf("err = %v, want ErrIdleShareUnavailable", err)
 	}
 }
