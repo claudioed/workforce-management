@@ -1,15 +1,14 @@
 # Project: Workforce Management (Supporting Bounded Context)
 
-Owns "who is on shift, on which process path, at what rate; direct vs indirect
-hours." This is the **shift-start planning horizon** (a human commits a split of
-headcount across paths) plus **intra-shift assignment tracking** (moving people
-between paths as backlogs deviate — the move itself is still a human call; this
-context makes the gap legible, it does not decide). It stops at the **path
-boundary**: it never links an associate to a specific task — dispatch of
-individual tasks to a claiming station belongs to Fulfillment Execution. Keeping
-these apart is deliberate: it lets task-dispatch policy change without touching
-workforce planning, and vice versa, because they change at completely different
-cadences (shifts vs seconds).
+Owns "who is on shift, on which process path, at what rate; direct vs
+indirect hours." Covers the **shift-start planning horizon** (a human commits
+a headcount split across paths) plus **intra-shift assignment tracking**
+(moving people between paths as backlogs deviate — the move itself is a human
+call; this context makes the gap legible, it does not decide). It stops at
+the **path boundary**: it never links an associate to a specific task —
+individual task dispatch belongs to `fulfillment-execution`. Full narrative
+docs (business context, DDD canvases, generated API reference) live at
+<https://claudioed.github.io/workforce-management/> and in [`docs/`](docs/).
 
 Source of truth for the domain model: `/Users/claudioed/docs/amazon-fulfillment-ddd.md`
 and `/Users/claudioed/warehouse-systems-ddd.md`. Honor that ubiquitous language.
@@ -18,186 +17,125 @@ and `/Users/claudioed/warehouse-systems-ddd.md`. Honor that ubiquitous language.
 
 Hexagonal / Ports & Adapters. Strict dependency rule: **domain depends on
 nothing; application depends on domain; adapters depend on application/domain.**
-No framework or SQL types in the domain layer.
+No framework or SQL types in the domain layer. Enforced by an arch-go fitness
+test (ADR-0007, `make arch-test`).
 
 ```
-cmd/workforce/                main.go — composition root
+cmd/workforce/                 OLTP composition root — main.go
+cmd/workforce-projector/       analytics writer: consumes analytics topic, projects
+cmd/workforce-reports/         analytics reader: read-only REST over the analytical DB
+cmd/mcp/                       MCP server (Streamable HTTP), ADR-0008
 internal/
   domain/
-    associate/                 AssociateShift aggregate (roster, certifications, breaks)
-    shiftplan/                 ShiftPlan aggregate (committed headcount split across paths)
-    assignment/                LaborAssignment aggregate (one associate, one path, an interval)
-    shared/                    value objects: AssociateId, PathId, Certification, events
+    associate/                  AssociateShift aggregate (roster, certifications, breaks)
+    shiftplan/                  ShiftPlan aggregate (committed headcount split across paths)
+    assignment/                 LaborAssignment aggregate (one associate, one path, an interval)
+    pathcatalog/                process-path catalogue model (prefix-match Lookup), ADR-0013
+    shared/                     value objects: AssociateId, PathId, Certification, events
   application/
-    ports/                     OUT: AssociateRepo, ShiftPlanRepo, AssignmentRepo, EventPublisher, Clock
-    usecases/                  one struct per use case
+    ports/                      OUT: repos, EventPublisher, UnitOfWork, ProcessedEvents,
+                                 Clock, MeasuredRateClient, InstalledCapacityClient, PathCatalogue
+    usecases/                   one struct per use case (see rules/domain-model.md)
+  analytics/report/             Labor Utilization & Staffing read model + ports — depends on nothing
   adapters/
-    inbound/http/               chi handlers, DTOs, error mapping
-    outbound/postgres/          pgxpool repos + migrations
-    outbound/memory/            in-memory repos for tests/local
-    outbound/events/            log/buffered publisher (kafka-ready iface)
-migrations/                   golang-migrate SQL files
+    inbound/http/                chi handlers (OLTP + reports), DTOs, RFC 7807 error mapping
+    inbound/kafka/                analytics consumer (projector)
+    inbound/mcp/                  MCP tools incl. the curated labor-report tool
+    outbound/postgres/            pgxpool repos + golang-migrate migrations
+    outbound/analyticsstore/      analytical projection writer + read-only reader + memory store
+    outbound/memory/              in-memory repos for tests/local
+    outbound/events/              log/buffered publisher + multi (fan-out) publisher
+    outbound/kafka/               integration publisher + analytics publisher + trace-context carrier
+    outbound/fulfillmentexecution/  InstalledCapacityClient HTTP client (ADR-0014)
+    outbound/laborperformance/      MeasuredRateClient HTTP client (ADR-0012)
+    outbound/filecatalog/           loads the process-path catalogue YAML (ADR-0013)
+    outbound/kafkacatalog/          Kafka-sourced alternative catalogue adapter
+    outbound/clock/                 system clock
+    outbound/telemetry/             OTel setup (traces/metrics) + trace-aware slog handler
+migrations/                    golang-migrate SQL files (OLTP, incl. outbox table)
+migrations/analytics/          golang-migrate SQL files (analytical DB, owned by the projector)
+web/                           workforce-mfe — Vite/React MFE remote, see rules/frontend.md
 ```
 
-## Analytics data product (ADR-0010)
+Deep-dive references, split out so this file stays a short index:
 
-Additive read side built from this service's OWN domain events. The OLTP
-domain/application layers are NOT modified and must NOT import the analytics
-store (arch-test enforces). `internal/analytics/report/` depends on nothing.
-(`ProcessedEvents` in application/ports is the shared idempotency gate, used
-only by the analytics projector — the OLTP write path does not depend on it.)
+- **rules/domain-model.md** — ubiquitous language, aggregates & invariants,
+  domain events, use cases, REST API surface.
+- **rules/integrations.md** — outbound HTTP clients (measured rate, installed
+  capacity), the process-path catalogue, Kafka events + transactional outbox,
+  CORS.
+- **rules/analytics-and-observability.md** — the analytics data product
+  (ADR-0010), the MCP inbound adapter (ADR-0008), OTel traces/metrics/logs.
+- **rules/frontend.md** — the `web/` micro-frontend remote.
 
-- Events are fanned to a SEPARATE topic `warehouse.workforce.analytics` by a new
-  outbound adapter; the integration topic/publisher are untouched. Selected by
-  `EVENT_PUBLISHER=kafka` (fan-out alongside the integration publisher).
-- Separate analytical Postgres (`ANALYTICS_DATABASE_URL`), own migrations
-  (`migrations/analytics/`), read-only reader role.
-- Three processes: `cmd/workforce` (OLTP), `cmd/workforce-projector` (the ONLY
-  writer; consumes from FirstOffset, idempotent on event_id),
-  `cmd/workforce-reports` (read-only reader, `GET /reports/...`). MCP report tool too.
-- Report: **Labor Utilization & Staffing**, keyed per path/shift × hour (shifts
-  started/ended, break time, labor assigned/reassigned, understaffing).
-- `GET /reports/.../freshness` reports projection lag.
+## Key Commands
 
-## Ubiquitous Language (use these exact names — do not invent synonyms)
+```bash
+# Run the OLTP service (Postgres required)
+docker compose up -d
+export DATABASE_URL="postgres://workforce:***@localhost:5432/workforce?sslmode=disable"
+go run ./cmd/workforce                # :8080, applies migrations on boot
 
-- **ShiftPlan** — the committed split of headcount across paths for one shift.
-  ONE per building per shift. Contains PathPlan lines: path, plannedHeads,
-  plannedRate, plannedHours. Committed by a human; the software proposes
-  (charge per path / planned rate = heads needed), a human commits it.
-- **AssociateShift** — who is on, their certifications, their breaks. Owned here,
-  referenced everywhere else (e.g. Fulfillment Execution reads certifications to
-  gate station claims, but never writes here).
-- **LaborAssignment** — one associate on one path for an interval. INVARIANT:
-  exactly one ACTIVE assignment per associate at a time. The assignment MUST
-  satisfy the path's certification requirement (reject if uncertified).
-- **Certification** — a named qualification (e.g. "pack", "hazmat", "pick").
-  An associate untrained on a path cannot be assigned to it; training is itself
-  a path that consumes hours (do not special-case that here — just enforce the
-  gate on assignment). `"hazmat"` is a REAL, in-use value, not hypothetical:
-  a path literally named `"hazmat"` requires the associate hold the `"hazmat"`
-  certification, via the existing path-name-equals-certification-name
-  convention — no new code was needed to support it (ADR-0009). This is the
-  independent, path-level half of hazmat handling; `fulfillment-execution`
-  separately gates hazmat at the station-capability level for individual task
-  claims — different bounded context, different mechanism, same real-world
-  concern.
-- **PathUnderstaffed** — a flag, not a decision: plannedHeads(path) not currently
-  met by active assignments. Surfacing the gap, not moving anyone, is this
-  context's job — moving people is a human call recorded via CommitAssignment.
-- What this context explicitly does NOT do: it does not link an associate to a
-  task, does not dispatch work, and does not decide rebalancing — it only makes
-  the labor picture legible and enforces the two hard invariants below.
+# Fast pre-commit loop (no DB needed, ~1 min)
+make check        # fmt-check, vet, build, lint, test (-race)
 
-## Aggregates & invariants (enforce in domain, unit-tested)
+# Before pushing
+make check-all    # check + coverage gate (90%) + arch-test + bdd
 
-- **ShiftPlan**: plannedHeads(path) ≤ installedStations(path) — the same
-  invariant Work Planning enforces on its own PathPlan; enforce it here too,
-  independently, since this is the aggregate that actually commits headcount.
-  Sum of plannedHours per associate must not exceed a shift's max hours.
-- **LaborAssignment**: exactly ONE active assignment per associate at a time
-  (no double-booking across paths); assignment requires the associate holds the
-  path's required certification, or it is rejected.
-- **AssociateShift**: cannot be assigned while on a logged break; hours logged
-  must not exceed a configured max-hours-per-shift limit.
-- Read models (heads-planned-vs-active per path, per-associate utilization) are
-  PROJECTIONS built from events — NOT state stored redundantly on aggregates.
+# Other gates
+make vuln         # govulncheck — run after touching go.mod/go.sum
+make mutation     # fast gremlins subset on internal/domain/shiftplan (blocks CI)
+make mutation-full   # exhaustive gremlins over internal/domain (scheduled)
+make integration  # needs Postgres/DATABASE_URL; outbox tests use testcontainers
 
-## Domain events (past tense — use these exact names)
+# Docs site (Docusaurus, generates REST reference from apis/openapi.yaml)
+cd docs && npm ci && npm run gen-api-docs -- all && npm run build
+```
 
-ShiftPlanProposed, ShiftPlanCommitted, AssociateShiftStarted, AssociateCertified,
-AssociateBreakStarted, AssociateBreakEnded, LaborAssigned, LaborReassigned,
-PathUnderstaffed, AssociateShiftEnded.
+`make help` lists every target; each mirrors a `.github/workflows/ci.yml` job
+so local feedback matches CI. `lefthook install` wires `make check`/lint into
+git hooks (pre-commit/pre-push) — optional, run `make check` proactively
+regardless since hooks are per-clone.
 
-## Use cases (application layer)
-
-1. StartAssociateShift(associateId, certifications) -> AssociateShift
-2. CertifyAssociate(associateId, certification) -> adds a certification
-3. ProposePathPlan(buildingId, charge-per-path, plannedRate) -> proposed heads
-   (pure computation: heads = ceil(charge / rate); does not commit)
-4. CommitShiftPlan(buildingId, pathPlans) -> ShiftPlan (validates plannedHeads
-   <= installedStations; a human-initiated commit, not automatic)
-5. AssignLabor(associateId, pathId) -> LaborAssignment (validates certification,
-   validates no other ACTIVE assignment for this associate; ends prior assignment)
-6. StartBreak(associateId) / EndBreak(associateId)
-7. GetStaffingGap(pathId) -> plannedHeads vs activeAssignments read model; may
-   raise PathUnderstaffed
-8. EndAssociateShift(associateId) -> closes all active assignments, AssociateShiftEnded
-
-## REST API (inbound adapter)
-
-- POST /associates/{id}/start-shift              -> StartAssociateShift
-- POST /associates/{id}/certifications            -> CertifyAssociate
-- POST /paths/{pathId}/plan/propose               -> ProposePathPlan
-- POST /shift-plans                               -> CommitShiftPlan
-- POST /associates/{id}/assignments               -> AssignLabor
-- POST /associates/{id}/break/start               -> StartBreak
-- POST /associates/{id}/break/end                 -> EndBreak
-- GET  /paths/{pathId}/staffing-gap                -> GetStaffingGap
-- POST /associates/{id}/end-shift                  -> EndAssociateShift
-- GET  /healthz
-
-JSON DTOs live in the http adapter; never leak domain structs directly.
-
-CORS middleware (`go-chi/cors`) is enabled on every route, allowing
-`CORS_ALLOWED_ORIGINS` (env, default `http://localhost:5173,http://localhost:5185`
-— the `warehouse-console` shell and this service's own `workforce-mfe`
-remote). This service is not part of the fleet's cross-service Order
-Lifecycle read model (see ADR-0002 in `warehouse-ops-agent`'s docs) — no
-order-lifecycle stage touches workforce/staffing state — CORS here exists
-solely for this service's own `workforce-mfe` screen below.
-
-## Frontend micro-frontend remote (`web/`)
-
-This repo also owns `web/`: `workforce-mfe`, a Vite + React Module
-Federation **remote** consumed by the separate `warehouse-console` shell
-repo. It is a plain browser client of this service's own REST API above
-(staffing-gap-by-path dashboard) — nothing in `web/` talks to any other
-bounded context, and nothing in `internal/` knows `web/` exists. `web/`
-has its own `package.json`, build, and dev server (`:5185`); it does not
-participate in this repo's Go quality gate and is not part of the Go
-module.
-
-## Tech & standards
+## Code Standards
 
 - Go 1.26, modules. Module path: `github.com/claudioed/workforce-management`.
-- chi (github.com/go-chi/chi/v5), pgx/v5 + pgxpool, golang-migrate SQL migrations.
-- Config via env (DATABASE_URL, HTTP_ADDR). docker-compose.yml for Postgres 16.
-- Typed domain errors mapped to HTTP status in the adapter.
-- Table-driven tests: domain + application (in-memory adapter); one httptest per
-  endpoint; build-tagged Postgres integration test (skipped w/o DATABASE_URL).
+- chi (`go-chi/chi/v5`), pgx/v5 + pgxpool, golang-migrate SQL migrations.
+- Config via env (`DATABASE_URL`, `HTTP_ADDR`, see README.md's full env
+  table for every service/adapter mode variable).
+- Typed domain errors mapped to HTTP status + RFC 7807 `application/problem+json`
+  in the adapter (ADR-0005) — never a bespoke error shape.
+- JSON DTOs live in the http adapter; never leak domain structs directly.
 - gofmt/go vet clean; every package has a doc comment.
 
-## Local quality gate (run before every commit)
+## Testing
 
-- After making changes and **before committing**, run `make check`. That is the
-  fast self-correction loop: `fmt-check`, `vet`, `build`, `lint`, `test`
-  (`go test ./... -race`). It needs no database and finishes in about a minute.
-- **Before pushing**, run `make check-all` — `check` plus the 90% `coverage`
-  gate, `arch-test` (hexagonal fitness) and `bdd` (godog/Gherkin acceptance).
-- Run `make vuln` (`govulncheck ./...`) after touching `go.mod`/`go.sum`; it is
-  a blocking CI job and it flags known CVEs in the dependency graph and stdlib.
-- `make mutation` runs the fast gremlins subset that blocks in CI
-  (`./internal/domain/shiftplan`, thresholds in `.gremlins.yaml`);
-  `make mutation-full` is the exhaustive scheduled run over `./internal/domain`.
-- `make integration` needs a running Postgres and `DATABASE_URL`; it is
-  deliberately outside `check`/`check-all`.
-- The lefthook git hooks enforce this automatically once you have run
-  `lefthook install` locally (pre-commit: fmt-check/vet/lint; pre-push:
-  `make check`) — but run `make check` proactively rather than relying on the
-  hook, since hooks are per-clone and may not be installed.
-- Why: it keeps quality *left* (harness engineering) — the CI sensors are
-  available locally so problems are caught and self-corrected before they ever
-  reach a human reviewer or the pipeline.
+- Table-driven tests: domain + application (in-memory adapters); one
+  `httptest` case per endpoint; build-tagged Postgres integration tests
+  (`-tags=integration`, skipped without `DATABASE_URL`; outbox tests boot
+  their own Postgres via testcontainers).
+- BDD/acceptance: `features/*.feature` (Gherkin) run via godog against the
+  real HTTP surface wired to in-memory adapters (`go test ./... -run
+  TestFeatures -v`, ADR-0006). One feature file per invariant area:
+  shift_plan, labor_assignment, breaks, staffing_gap.
+- Mutation testing (gremlins, `.gremlins.yaml`): fast subset on
+  `internal/domain/shiftplan` blocks CI; the full `internal/domain` run is
+  scheduled, not blocking.
+- Coverage gate: 90% over `internal/domain/...,internal/application/...`.
 
-## Definition of done
+## Definition of Done
 
-- `go build ./...`, `go vet ./...`, `go test ./...` (and `-race`) all green.
-- gofmt clean.
-- README.md: run steps (compose/migrate/go run), endpoints w/ curl examples, a
-  layering note, and a short explicit note on the "stops at the path boundary"
-  design decision (why no associate-to-task link exists here).
-- These invariants each have a failing-path test: plannedHeads > installedStations
-  rejected on ShiftPlan commit; double-booking (second ACTIVE assignment for the
-  same associate) rejected; assignment without required certification rejected;
+- `go build ./...`, `go vet ./...`, `go test ./...` (and `-race`) all green;
+  gofmt clean.
+- README.md updated: run steps, endpoints w/ curl examples, layering note,
+  and the "stops at the path boundary" rationale if touched.
+- Each of these four invariants has a dedicated failing-path test at domain
+  + use-case + HTTP layers: `plannedHeads > installedStations` rejected on
+  `ShiftPlan` commit; double-booking (second ACTIVE assignment for the same
+  associate) rejected; assignment without required certification rejected;
   assignment while on an active break rejected.
+- If `apis/openapi.yaml` changed, regenerate the docs site reference pages:
+  `cd docs && npm run gen-api-docs -- all` and commit the result — see
+  `docs/package.json`'s `gen-api-docs` script. `apis/asyncapi.yaml` has no
+  generated pages today; its narrative counterpart is
+  `docs/docs/ecosystem/integration.md` — update both together.
