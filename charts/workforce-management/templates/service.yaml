@@ -4,6 +4,7 @@ metadata:
   name: {{ include "workforce-management.fullname" . }}
   labels:
     {{- include "workforce-management.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -13,3 +14,4 @@ spec:
       name: http
   selector:
     {{- include "workforce-management.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
