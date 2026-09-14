@@ -5,17 +5,17 @@ go 1.26.6
 require (
 	github.com/arch-go/arch-go v1.7.0
 	github.com/cucumber/godog v0.16.0
-	github.com/exaring/otelpgx v0.11.1
+	github.com/exaring/otelpgx v0.12.0
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-chi/cors v1.2.2
-	github.com/golang-migrate/migrate/v4 v4.19.1
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/golang-migrate/migrate/v4 v4.20.1
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/riandyrn/otelchi v0.12.3
 	github.com/segmentio/kafka-go v0.4.51
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/kafka v0.44.0
-	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
+	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.71.0
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.46.0
