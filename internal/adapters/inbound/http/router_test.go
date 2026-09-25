@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -214,6 +215,46 @@ func TestProposePathPlan_OmittedRateFallsBackToZeroHeadsWithoutMeasuredRate(t *t
 	}
 	if resp.ProposedHeads != 0 {
 		t.Fatalf("expected 0 proposed heads with no rate available, got %d", resp.ProposedHeads)
+	}
+}
+
+// fakeIdleShareClient is an HTTP-layer test double for ports.IdleShareClient.
+type fakeIdleShareClient struct {
+	share float64
+	err   error
+}
+
+func (f *fakeIdleShareClient) IdleSharePct(_ context.Context, _ shared.PathId) (float64, error) {
+	return f.share, f.err
+}
+
+// TestProposePathPlan_HighIdleShareTrimsProposalOverHTTP is a wire-level
+// test for the idleness-as-staffing-signal trim: a high observed idle
+// share must be reflected in a lower proposedHeads and a non-empty
+// trimReason on the JSON response.
+func TestProposePathPlan_HighIdleShareTrimsProposalOverHTTP(t *testing.T) {
+	handler := newTestHandler()
+	handler.ProposePathPlan = &usecases.ProposePathPlan{
+		Events:    handler.ProposePathPlan.Events,
+		Clock:     handler.ProposePathPlan.Clock,
+		IdleShare: &fakeIdleShareClient{share: 0.5},
+	}
+	router := NewRouter(handler, testLogger, "")
+	rec := doRequest(t, router, http.MethodPost, "/paths/pack/plan/propose", proposePathPlanRequest{BuildingId: "bldg-1", Charge: 100, PlannedRate: 10})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp proposePathPlanResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// ceil(100/10) = 10 heads before trim; share 0.5 > default 0.30
+	// threshold trims to ceil(10*(1-0.5)) = 5.
+	if resp.ProposedHeads != 5 {
+		t.Fatalf("expected 5 proposed heads after trim, got %d", resp.ProposedHeads)
+	}
+	if resp.TrimReason == "" {
+		t.Fatal("expected a non-empty trimReason when a trim was applied")
 	}
 }
 
@@ -445,6 +486,63 @@ func TestStaffingGap_RejectsUnknownPathId(t *testing.T) {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 	assertProblemDetails(t, rec, http.StatusBadRequest, "unknown-path-id", "/paths/not-a-real-path/staffing-gap")
+}
+
+// TestStaffingGap_ObservedIdlePctOmittedWhenUnwired covers the default,
+// permissive configuration: newTestHandler leaves IdleShare nil, so
+// observedIdlePct must be entirely absent from the JSON body (omitempty
+// on a nil pointer), never a fabricated 0.
+func TestStaffingGap_ObservedIdlePctOmittedWhenUnwired(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	req := commitShiftPlanRequest{
+		BuildingId: "bldg-1",
+		ShiftId:    "shift-1",
+		Lines: []pathPlanLineRequest{
+			{PathId: "pack", PlannedHeads: 3, PlannedRate: 30, PlannedHours: 24, InstalledStations: 10},
+		},
+	}
+	doRequest(t, router, http.MethodPost, "/shift-plans", req)
+
+	rec := doRequest(t, router, http.MethodGet, "/paths/pack/staffing-gap?buildingId=bldg-1&shiftId=shift-1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "observedIdlePct") {
+		t.Fatalf("expected observedIdlePct to be omitted entirely when unwired, got body: %s", rec.Body.String())
+	}
+}
+
+// TestStaffingGap_ObservedIdlePctSurfacedOverHTTP is a wire-level test
+// for the idleness-as-staffing-signal surfacing: a wired IdleShareClient
+// reporting a value must appear verbatim as observedIdlePct on the JSON
+// response.
+func TestStaffingGap_ObservedIdlePctSurfacedOverHTTP(t *testing.T) {
+	handler := newTestHandler()
+	handler.GetStaffingGap.IdleShare = &fakeIdleShareClient{share: 0.42}
+	router := NewRouter(handler, testLogger, "")
+	req := commitShiftPlanRequest{
+		BuildingId: "bldg-1",
+		ShiftId:    "shift-1",
+		Lines: []pathPlanLineRequest{
+			{PathId: "pack", PlannedHeads: 3, PlannedRate: 30, PlannedHours: 24, InstalledStations: 10},
+		},
+	}
+	doRequest(t, router, http.MethodPost, "/shift-plans", req)
+
+	rec := doRequest(t, router, http.MethodGet, "/paths/pack/staffing-gap?buildingId=bldg-1&shiftId=shift-1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp staffingGapResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ObservedIdlePct == nil {
+		t.Fatal("expected observedIdlePct to be present when IdleShare is wired")
+	}
+	if *resp.ObservedIdlePct != 0.42 {
+		t.Fatalf("observedIdlePct = %v, want 0.42", *resp.ObservedIdlePct)
+	}
 }
 
 func TestEndShift(t *testing.T) {

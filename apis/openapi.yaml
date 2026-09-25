@@ -183,7 +183,13 @@ paths:
         raises ShiftPlanProposed for visibility — it persists nothing and
         commits nothing. A human must still call POST /shift-plans to commit
         an actual ShiftPlan. This is why the response is 200, not 201: no
-        resource is created.
+        resource is created. When a high observed idle share
+        (idleness-as-staffing-signal, fed back from labor-performance via
+        `LABOR_PERFORMANCE_MODE=kafka-cache`) is available for this path's
+        task type and exceeds `IDLE_SHARE_TRIM_THRESHOLD` (default 0.30),
+        the computed heads are further trimmed (floored at 1 head minimum)
+        and `trimReason` explains why — fail-open: no idle-share signal
+        available applies no trim.
       tags: [Shift Plans]
       parameters:
         - $ref: "#/components/parameters/PathId"
@@ -525,6 +531,7 @@ paths:
                 plannedHeads: 3
                 activeHeads: 1
                 understaffed: true
+                observedIdlePct: 0.42
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
@@ -758,7 +765,10 @@ components:
           example: pack
         proposedHeads:
           type: integer
-          description: ceil(charge / resolvedRate). Not committed.
+          description: >-
+            ceil(charge / resolvedRate), further trimmed when a high
+            observed idle share exceeds IDLE_SHARE_TRIM_THRESHOLD (see
+            trimReason). Not committed.
           example: 4
         resolvedRate:
           type: number
@@ -778,6 +788,18 @@ components:
             labor-performance). Lets a human see why proposedHeads came
             back 0 (no rate from either source) rather than guessing.
           example: caller
+        trimReason:
+          type: string
+          description: >-
+            Non-empty only when a high observed idle share
+            (idleness-as-staffing-signal) trimmed proposedHeads --
+            explains the observed share, the threshold, and the
+            before/after head counts, so the trim is auditable. Omitted
+            (or empty) when no trim was applied, including when no
+            idle-share signal is available at all (fail-open).
+          example: >-
+            observed idle share 50.0% for path "pack" exceeds the 30.0%
+            trim threshold; heads trimmed from 10 to 5
 
     PathPlanLineRequest:
       type: object
@@ -907,3 +929,15 @@ components:
         understaffed:
           type: boolean
           example: true
+        observedIdlePct:
+          type: number
+          format: double
+          description: >-
+            The observed idle share (a fraction in [0, 1], NOT a 0-100
+            percentage) for this path's task type, fed back from
+            labor-performance's idleness signal via
+            LABOR_PERFORMANCE_MODE=kafka-cache. Omitted entirely -- never
+            a fabricated 0 -- when no idle-share signal is available: the
+            mode isn't kafka-cache, or no observation has been recorded
+            yet for this task type.
+          example: 0.42

@@ -61,6 +61,41 @@ type MeasuredRateClient interface {
 // ProposePathPlan's single error-handling branch depends on this being
 // the ONLY error a MeasuredRateClient ever returns.
 
+// IdleShareClient reports an observed idle share for a path's task type --
+// the fraction of that TaskType's clocked time (task-doing time plus
+// between-task idle waiting time) that was idle, fed back from
+// labor-performance's idleness signal via this service's
+// laborperformancecache.Consumer (ADR addendum: idle-share staffing
+// signal). Unlike MeasuredRateClient, only the kafka-cache
+// LABOR_PERFORMANCE_MODE implements this port today -- the http and
+// permissive modes have no per-message idle_seconds_before stream to
+// observe, so a composition root running either of those leaves the field
+// this is wired through nil, and both GetStaffingGap and ProposePathPlan
+// already treat a nil IdleShareClient as "no signal, no trim/no
+// surfacing" -- the same fail-open discipline every other *_MODE in this
+// fleet defaults to.
+type IdleShareClient interface {
+	// IdleSharePct returns the observed idle share (a fraction in [0, 1],
+	// NOT a 0-100 percentage) for pathId's task type, or
+	// ErrIdleShareUnavailable on ANY failure to produce one -- no TaskType
+	// mapping for pathId, or no TaskPerformanceRecorded message carrying a
+	// non-nil idle_seconds_before has been observed yet for that TaskType.
+	// A nil idle_seconds_before means "not observed" (first-ever
+	// completion, a negative/zero gap from Kafka reordering, or an empty
+	// AssociateId e.g. a robot station) -- it is NEVER coerced into a 0
+	// share, so a TaskType with data for its mean but none for idle share
+	// yet is reported unavailable, not a false 0.
+	IdleSharePct(ctx context.Context, pathId shared.PathId) (float64, error)
+}
+
+// ErrIdleShareUnavailable is returned by an IdleShareClient implementation
+// for every failure mode a caller cannot usefully act on differently:
+// no TaskType mapping for this path, or genuinely no idle-share data
+// observed yet. GetStaffingGap and ProposePathPlan both fail open on it --
+// surface nothing / trim nothing -- exactly mirroring
+// ErrMeasuredRateUnavailable's contract.
+var ErrIdleShareUnavailable = errors.New("idle share unavailable")
+
 // InstalledCapacityClient queries fulfillment-execution for the real,
 // live count of registered stations that hold a path's capability, so
 // CommitShiftPlan can enforce plannedHeads against physical reality

@@ -123,8 +123,9 @@ Env vars:
 | `EVENT_PUBLISHER` | no | `log` | `log` or `kafka` — see [Integration](#integration). With `kafka`, events are written to the `outbox_events` table in the same transaction as the aggregate and relayed to both topics by an in-process relay ([ADR-0016](docs/docs/adr/0016-transactional-outbox.md)); they never go straight to the broker from a request |
 | `KAFKA_BROKERS` | no | `localhost:9092` | comma-separated broker list, used when `EVENT_PUBLISHER=kafka` |
 | `OUTBOX_RELAY_INTERVAL` | no | `1s` | how long the outbox relay sleeps between passes that found nothing to publish (Go duration; only meaningful with `EVENT_PUBLISHER=kafka`). A full batch is followed immediately by another pass |
-| `LABOR_PERFORMANCE_MODE` | no | `permissive` | `http` or `permissive` — selects the `ProposePathPlan` measured-rate feed from labor-performance (ADR-0012); `permissive` never reaches the network |
+| `LABOR_PERFORMANCE_MODE` | no | `permissive` | `http`, `kafka-cache`, or `permissive` — selects the `ProposePathPlan` measured-rate feed from labor-performance. `http` calls labor-performance synchronously (ADR-0012); `kafka-cache` replaces that call with a local, in-memory read model fed by labor-performance's `warehouse.labor-performance.events` integration topic (ADR-0019), requiring `KAFKA_BROKERS`, and additionally feeds the idle-share staffing signal (see `IDLE_SHARE_TRIM_THRESHOLD` below and ADR-0020); `permissive` never reaches the network |
 | `LABOR_PERFORMANCE_BASE_URL` | when `LABOR_PERFORMANCE_MODE=http` | — | labor-performance's base URL |
+| `IDLE_SHARE_TRIM_THRESHOLD` | no | `0.30` | Idle share (fraction, e.g. `0.3` = 30%) above which `ProposePathPlan` trims its proposed heads (idleness-as-staffing-signal, ADR-0020). Only takes effect when `LABOR_PERFORMANCE_MODE=kafka-cache` is also set — no other mode has an idle-share signal to trim against, so `ProposePathPlan` fails open (no trim) regardless of this value otherwise |
 | `INSTALLED_CAPACITY_MODE` | no | `permissive` | `http` or `permissive` — selects the `CommitShiftPlan` live installed-capacity ceiling client from fulfillment-execution (ADR-0014). Unlike `LABOR_PERFORMANCE_MODE`'s fail-open `permissive` default, this one is fail-LOUD: every `CommitShiftPlan` call is rejected until `http` mode is set, since a shift-plan commit mutates real state |
 | `FULFILLMENT_EXECUTION_BASE_URL` | when `INSTALLED_CAPACITY_MODE=http` | — | fulfillment-execution's base URL |
 | `PATH_CATALOGUE_FILE` | no | `/etc/workforce-management/process-paths.yaml` | Path to the declared process-path catalogue YAML (see `warehouse-infra`'s `config/process-paths/sortable-fc.yaml`, the same file `fulfillment-execution` and `wes-work-planning` read). Loaded once at startup; a missing or invalid file is a fatal boot-time error — see [ADR-0013](docs/docs/adr/0013-process-path-catalogue-validation.md) |
@@ -222,7 +223,11 @@ curl -X POST localhost:8080/associates/assoc-1/certifications \
 # measured rate fed back from labor-performance for pick/pack/slam paths
 # (feature: close-the-loop measured rate, ADR-0012). Response includes
 # resolvedRate + rateSource ("caller" or "measured") so it's always clear
-# where the number came from.
+# where the number came from. When LABOR_PERFORMANCE_MODE=kafka-cache is
+# set and the observed idle share for this path's task type exceeds
+# IDLE_SHARE_TRIM_THRESHOLD (default 0.30), proposedHeads is further
+# trimmed (floored at 1 head) and trimReason explains why
+# (idleness-as-staffing-signal, ADR-0020).
 curl -X POST localhost:8080/paths/pack/plan/propose \
   -d '{"buildingId":"bldg-1","charge":100,"plannedRate":30}'
 # -> {"pathId":"pack","proposedHeads":4,"resolvedRate":30,"rateSource":"caller"}
@@ -499,3 +504,52 @@ go test ./... -run TestFeatures -v
 Step definitions and the suite entry point (`TestFeatures`) are in
 [`features_test.go`](features_test.go) at the repo root. CI runs them as a
 dedicated `bdd` job.
+
+## Operator micro-frontend (`web/`)
+
+`web/` is `workforce_mfe`, this context's Module Federation remote. It talks only to
+this service's own REST API and is never part of `make check`.
+
+**Standalone development** is unchanged:
+
+```bash
+cd web && npm install && npm run dev     # http://localhost:5185
+```
+
+**Deployed to the kind cluster**, it is built into a static bundle and served
+by its own `nginx-unprivileged` pod:
+
+```bash
+cd web
+docker build --build-context uikit=../../warehouse-ui-kit \
+  -t warehouse/workforce-management-frontend:local .
+```
+
+The cluster's localhost topology separates the two kinds of traffic onto two
+independent entrypoints, and neither proxies to the other:
+
+| URL | Served by | Carries |
+|---|---|---|
+| `http://localhost/mfes/workforce-management/` | Nginx web gateway → this remote's nginx pod | HTML, JS, CSS, fonts, `remoteEntry.js` |
+| `http://localhost:8000/api/workforce-management/` | Kong | this service's REST API |
+
+Kong never serves frontend assets, and the Nginx gateway never proxies an API.
+Enable the workload with `frontend.enabled=true` in the Helm chart; the Service
+is deliberately `ClusterIP` with no Ingress/HTTPRoute, because frontend path
+routing belongs to the Nginx web gateway in `warehouse-infra`.
+
+Because one image must work in more than one environment, the remote reads its
+API origin at runtime from `window.__WAREHOUSE_CONFIG__.apiOrigin` (published
+by the console shell) rather than baking a hostname in at build time. A
+production build with no runtime config **fails loudly** instead of silently
+falling back to a developer port; standalone `npm run dev` still uses
+`http://localhost:8085`. See `web/src/config.ts`.
+
+Chart invariants are asserted by:
+
+```bash
+python3 charts/workforce-management/tests/test_service_selectors.py
+```
+
+which proves every Service selects exactly one Deployment — the OLTP Service
+must never select the frontend, analytics or MCP pods.

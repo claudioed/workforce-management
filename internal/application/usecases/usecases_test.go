@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"testing"
 	"time"
 
@@ -198,7 +199,7 @@ func TestCertifyAssociate_NotFound(t *testing.T) {
 func TestProposePathPlan_ComputesCeil(t *testing.T) {
 	f := newFixtures()
 	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock}
-	heads, resolvedRate, rateSource, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
+	heads, resolvedRate, rateSource, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -223,6 +224,18 @@ type fakeMeasuredRateClient struct {
 func (f *fakeMeasuredRateClient) MeanActualSeconds(_ context.Context, _ shared.PathId) (float64, error) {
 	f.called = true
 	return f.seconds, f.err
+}
+
+// fakeIdleShareClient is a test double for ports.IdleShareClient.
+type fakeIdleShareClient struct {
+	share  float64
+	err    error
+	called bool
+}
+
+func (f *fakeIdleShareClient) IdleSharePct(_ context.Context, _ shared.PathId) (float64, error) {
+	f.called = true
+	return f.share, f.err
 }
 
 // fakeInstalledCapacityClient is a test double for
@@ -251,7 +264,7 @@ func TestProposePathPlan_FallsBackToMeasuredRateWhenNoCallerRate(t *testing.T) {
 	measured := &fakeMeasuredRateClient{seconds: 25}
 	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, MeasuredRate: measured}
 
-	heads, resolvedRate, rateSource, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
+	heads, resolvedRate, rateSource, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -277,7 +290,7 @@ func TestProposePathPlan_CallerRateAlwaysWinsOverMeasured(t *testing.T) {
 	measured := &fakeMeasuredRateClient{seconds: 999}
 	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, MeasuredRate: measured}
 
-	heads, resolvedRate, rateSource, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
+	heads, resolvedRate, rateSource, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -302,7 +315,7 @@ func TestProposePathPlan_MeasuredRateUnavailableFallsBackToZeroHeads(t *testing.
 	measured := &fakeMeasuredRateClient{err: ports.ErrMeasuredRateUnavailable}
 	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, MeasuredRate: measured}
 
-	heads, resolvedRate, rateSource, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
+	heads, resolvedRate, rateSource, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
 	if err != nil {
 		t.Fatalf("expected no error (fail-quiet), got %v", err)
 	}
@@ -321,7 +334,7 @@ func TestProposePathPlan_MeasuredRateUnavailableFallsBackToZeroHeads(t *testing.
 func TestProposePathPlan_NilMeasuredRateClientBehavesAsBeforeTheFeature(t *testing.T) {
 	f := newFixtures()
 	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock} // MeasuredRate left nil
-	heads, resolvedRate, rateSource, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
+	heads, resolvedRate, rateSource, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -339,9 +352,185 @@ func TestProposePathPlan_MeasuredRateClientNonSentinelErrorPropagates(t *testing
 	measured := &fakeMeasuredRateClient{err: errBoom}
 	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, MeasuredRate: measured}
 
-	_, _, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
+	_, _, _, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 0)
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("expected errBoom to propagate, got %v", err)
+	}
+}
+
+// --- idleness-as-staffing-signal: ProposePathPlan idle-share trim -----------
+
+// TestProposePathPlan_IdleShareTrim covers the boundary cases named in
+// the plan: exactly at threshold (no trim -- share must EXCEED the
+// threshold, not merely meet it), just above (trim applied), just below
+// (no trim), nil/no-data fail-open (no trim), and floor-at-1-head
+// clamping when a trim would otherwise go below 1.
+func TestProposePathPlan_IdleShareTrim(t *testing.T) {
+	const threshold = 0.30
+
+	tests := []struct {
+		name        string
+		heads       int // via charge/rate: charge=heads*10, rate=10
+		idleShare   float64
+		idleErr     error
+		nilIdle     bool
+		wantHeads   int
+		wantTrimmed bool
+	}{
+		{
+			name:      "exactly at threshold is NOT trimmed (share must exceed, not meet)",
+			heads:     10,
+			idleShare: threshold,
+			wantHeads: 10,
+		},
+		{
+			name:        "just above threshold is trimmed",
+			heads:       10,
+			idleShare:   threshold + 0.01,
+			wantHeads:   int(math.Ceil(10 * (1 - (threshold + 0.01)))),
+			wantTrimmed: true,
+		},
+		{
+			name:      "just below threshold is NOT trimmed",
+			heads:     10,
+			idleShare: threshold - 0.01,
+			wantHeads: 10,
+		},
+		{
+			name:      "nil/no-data fails open: no trim",
+			heads:     10,
+			nilIdle:   true,
+			wantHeads: 10,
+		},
+		{
+			name:        "floor at 1 head minimum when trim would go below 1",
+			heads:       2,
+			idleShare:   0.95,
+			wantHeads:   1,
+			wantTrimmed: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixtures()
+			var idleClient ports.IdleShareClient
+			if !tc.nilIdle {
+				idleClient = &fakeIdleShareClient{share: tc.idleShare, err: tc.idleErr}
+			}
+			uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, IdleShare: idleClient}
+
+			charge := float64(tc.heads) * 10
+			heads, _, _, trimReason, err := uc.Execute(context.Background(), "bldg-1", "pack", charge, 10)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if heads != tc.wantHeads {
+				t.Fatalf("heads = %d, want %d", heads, tc.wantHeads)
+			}
+			if tc.wantTrimmed && trimReason == "" {
+				t.Fatal("expected a non-empty trimReason when a trim was applied")
+			}
+			if !tc.wantTrimmed && trimReason != "" {
+				t.Fatalf("expected no trim, got trimReason %q", trimReason)
+			}
+		})
+	}
+}
+
+// TestProposePathPlan_IdleShareUnavailableFailsOpen covers the
+// ErrIdleShareUnavailable fail-open path explicitly (no TaskType
+// mapping, or genuinely no idle-share data yet) -- must never trim and
+// must never fail Execute.
+func TestProposePathPlan_IdleShareUnavailableFailsOpen(t *testing.T) {
+	f := newFixtures()
+	idleClient := &fakeIdleShareClient{err: ports.ErrIdleShareUnavailable}
+	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, IdleShare: idleClient}
+
+	heads, _, _, trimReason, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !idleClient.called {
+		t.Fatal("expected IdleShare to be consulted")
+	}
+	if heads != 10 {
+		t.Fatalf("expected no trim (10 heads), got %d", heads)
+	}
+	if trimReason != "" {
+		t.Fatalf("expected empty trimReason on fail-open, got %q", trimReason)
+	}
+}
+
+// TestProposePathPlan_NilIdleShareClientAppliesNoTrim covers the
+// composition-root safety net: a nil IdleShare (the default -- no
+// LABOR_PERFORMANCE_MODE=kafka-cache wired) must not panic and must
+// never trim, matching every other *_MODE permissive-by-default pattern.
+func TestProposePathPlan_NilIdleShareClientAppliesNoTrim(t *testing.T) {
+	f := newFixtures()
+	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock} // IdleShare left nil
+
+	heads, _, _, trimReason, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if heads != 10 || trimReason != "" {
+		t.Fatalf("expected no trim (10 heads, empty reason), got heads=%d trimReason=%q", heads, trimReason)
+	}
+}
+
+// TestProposePathPlan_IdleShareClientNonSentinelErrorPropagates mirrors
+// the MeasuredRateClient contract: any error other than
+// ErrIdleShareUnavailable from an IdleShareClient is a programming error
+// and must propagate as a hard failure.
+func TestProposePathPlan_IdleShareClientNonSentinelErrorPropagates(t *testing.T) {
+	f := newFixtures()
+	idleClient := &fakeIdleShareClient{err: errBoom}
+	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, IdleShare: idleClient}
+
+	_, _, _, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 10)
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("expected errBoom to propagate, got %v", err)
+	}
+}
+
+// TestProposePathPlan_ZeroHeadsNeverConsultsIdleShare: when the resolved
+// rate yields 0 proposed heads already, there is nothing to trim -- the
+// idle-share check must be skipped rather than trimming 0 to some other
+// value.
+func TestProposePathPlan_ZeroHeadsNeverConsultsIdleShare(t *testing.T) {
+	f := newFixtures()
+	idleClient := &fakeIdleShareClient{share: 0.99}
+	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, IdleShare: idleClient}
+
+	heads, _, _, trimReason, err := uc.Execute(context.Background(), "bldg-1", "pack", 0, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if heads != 0 || trimReason != "" {
+		t.Fatalf("expected 0 heads and no trim, got heads=%d trimReason=%q", heads, trimReason)
+	}
+	if idleClient.called {
+		t.Fatal("expected IdleShare NOT to be consulted when heads is already 0")
+	}
+}
+
+// TestProposePathPlan_CustomIdleShareTrimThreshold covers the
+// IDLE_SHARE_TRIM_THRESHOLD override: a caller-configured threshold
+// (rather than DefaultIdleShareTrimThreshold) governs the trim decision.
+func TestProposePathPlan_CustomIdleShareTrimThreshold(t *testing.T) {
+	f := newFixtures()
+	// A share of 0.6 would trim under the default 0.30 threshold, but
+	// must NOT trim under an overridden 0.90 threshold.
+	idleClient := &fakeIdleShareClient{share: 0.6}
+	uc := &ProposePathPlan{Events: f.pub, Clock: f.clock, IdleShare: idleClient, IdleShareTrimThreshold: 0.90}
+
+	heads, _, _, trimReason, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if heads != 10 || trimReason != "" {
+		t.Fatalf("expected no trim under the overridden 0.90 threshold, got heads=%d trimReason=%q", heads, trimReason)
 	}
 }
 
@@ -715,7 +904,7 @@ func TestProposePathPlan_PublishError(t *testing.T) {
 	f := newFixtures()
 	pub := &failingPublisher{LogPublisher: f.pub, err: errBoom}
 	uc := &ProposePathPlan{Events: pub, Clock: f.clock}
-	_, _, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
+	_, _, _, _, err := uc.Execute(context.Background(), "bldg-1", "pack", 100, 30)
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("expected errBoom, got %v", err)
 	}
@@ -968,6 +1157,76 @@ func TestGetStaffingGap_NotUnderstaffed(t *testing.T) {
 		if e.EventName() == "PathUnderstaffed" {
 			t.Fatal("did not expect PathUnderstaffed to be published")
 		}
+	}
+}
+
+// --- idleness-as-staffing-signal: GetStaffingGap surfacing ------------------
+
+// TestGetStaffingGap_ObservedIdlePctSurfaced covers pure surfacing: when
+// IdleShare reports a value, it appears verbatim on the response, with
+// no change to the existing gap computation.
+func TestGetStaffingGap_ObservedIdlePctSurfaced(t *testing.T) {
+	f := newFixtures()
+	commit := &CommitShiftPlan{ShiftPlans: f.shiftPlans, Events: f.pub, Clock: f.clock, InstalledCapacity: &fakeInstalledCapacityClient{capacityByPath: map[shared.PathId]int{"pack": 5}}, MaxHoursPerShift: 8}
+	lines := []shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 3, PlannedRate: 30, PlannedHours: 8}}
+	if _, err := commit.Execute(context.Background(), "bldg-1", "shift-1", lines, map[shared.PathId]int{"pack": 5}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	idleClient := &fakeIdleShareClient{share: 0.42}
+	uc := &GetStaffingGap{ShiftPlans: f.shiftPlans, Assignments: f.assignments, Events: f.pub, Clock: f.clock, IdleShare: idleClient}
+	gap, err := uc.Execute(context.Background(), "bldg-1", "shift-1", "pack")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gap.ObservedIdlePct == nil {
+		t.Fatal("expected ObservedIdlePct to be non-nil when IdleShare reports a value")
+	}
+	if *gap.ObservedIdlePct != 0.42 {
+		t.Fatalf("ObservedIdlePct = %v, want 0.42", *gap.ObservedIdlePct)
+	}
+}
+
+// TestGetStaffingGap_ObservedIdlePctNilWhenUnwired covers the default,
+// permissive configuration (no LABOR_PERFORMANCE_MODE=kafka-cache
+// wired): ObservedIdlePct must be nil, never a fabricated 0.
+func TestGetStaffingGap_ObservedIdlePctNilWhenUnwired(t *testing.T) {
+	f := newFixtures()
+	commit := &CommitShiftPlan{ShiftPlans: f.shiftPlans, Events: f.pub, Clock: f.clock, InstalledCapacity: &fakeInstalledCapacityClient{capacityByPath: map[shared.PathId]int{"pack": 5}}, MaxHoursPerShift: 8}
+	lines := []shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 3, PlannedRate: 30, PlannedHours: 8}}
+	if _, err := commit.Execute(context.Background(), "bldg-1", "shift-1", lines, map[shared.PathId]int{"pack": 5}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	uc := &GetStaffingGap{ShiftPlans: f.shiftPlans, Assignments: f.assignments, Events: f.pub, Clock: f.clock} // IdleShare left nil
+	gap, err := uc.Execute(context.Background(), "bldg-1", "shift-1", "pack")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gap.ObservedIdlePct != nil {
+		t.Fatalf("expected nil ObservedIdlePct when IdleShare is unwired, got %v", *gap.ObservedIdlePct)
+	}
+}
+
+// TestGetStaffingGap_ObservedIdlePctNilOnErrIdleShareUnavailable covers
+// the no-data-yet / no-TaskType-mapping case: ObservedIdlePct must be
+// nil, and the error must never fail Execute (pure surfacing).
+func TestGetStaffingGap_ObservedIdlePctNilOnErrIdleShareUnavailable(t *testing.T) {
+	f := newFixtures()
+	commit := &CommitShiftPlan{ShiftPlans: f.shiftPlans, Events: f.pub, Clock: f.clock, InstalledCapacity: &fakeInstalledCapacityClient{capacityByPath: map[shared.PathId]int{"pack": 5}}, MaxHoursPerShift: 8}
+	lines := []shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 3, PlannedRate: 30, PlannedHours: 8}}
+	if _, err := commit.Execute(context.Background(), "bldg-1", "shift-1", lines, map[shared.PathId]int{"pack": 5}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	idleClient := &fakeIdleShareClient{err: ports.ErrIdleShareUnavailable}
+	uc := &GetStaffingGap{ShiftPlans: f.shiftPlans, Assignments: f.assignments, Events: f.pub, Clock: f.clock, IdleShare: idleClient}
+	gap, err := uc.Execute(context.Background(), "bldg-1", "shift-1", "pack")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gap.ObservedIdlePct != nil {
+		t.Fatalf("expected nil ObservedIdlePct on ErrIdleShareUnavailable, got %v", *gap.ObservedIdlePct)
 	}
 }
 

@@ -15,3 +15,9 @@ Feature: Surfacing the staffing gap for a path
     And associate "assoc-1" is assigned to path "pack"
     When the staffing gap for path "pack" is requested for building "bldg-1" shift "shift-1"
     Then path "pack" is flagged PathUnderstaffed with 3 planned heads and 1 active head
+
+  @bdd
+  Scenario: High idle share trims the proposal
+    Given the observed idle share for path "pack" is 0.5
+    When a path plan is proposed for path "pack" building "bldg-1" with charge 100 and planned rate 10
+    Then the proposed heads are trimmed to 5 with a non-empty trim reason
