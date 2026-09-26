@@ -551,6 +551,64 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /buildings/{buildingId}/shifts/{shiftId}/staffing-gap:
+    get:
+      operationId: listStaffingGapsForShift
+      summary: >-
+        List the staffing gap for every path planned within one committed
+        shift plan (fleet-wide, all-paths view)
+      description: >-
+        ADR-0011's deferred fast-follow: a fleet-wide "all paths, one
+        building/shift" list endpoint, for contexts that need every path's
+        staffing gap for a building+shift in one call rather than one
+        request per path. Reuses the exact same per-path computation as
+        GET /paths/{pathId}/staffing-gap — the two can never disagree for
+        a given path — and raises PathUnderstaffed for every understaffed
+        path in the plan. This surfaces the gaps only — it never decides
+        or performs a rebalance; that stays a human call recorded via
+        POST /associates/{id}/assignments.
+      tags: [Staffing]
+      parameters:
+        - $ref: "#/components/parameters/BuildingId"
+        - $ref: "#/components/parameters/ShiftId"
+      responses:
+        "200":
+          description: >-
+            Staffing gap for every path planned in this building's
+            committed shift, one entry per path.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StaffingGapResponse"
+              example:
+                - pathId: pack
+                  plannedHeads: 3
+                  activeHeads: 1
+                  understaffed: true
+                  observedIdlePct: 0.42
+                - pathId: pick
+                  plannedHeads: 1
+                  activeHeads: 1
+                  understaffed: false
+        "404":
+          description: >-
+            No committed ShiftPlan exists for buildingId+shiftId
+            (resource-not-found).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.workforce-management.warehouse-systems.dev/resource-not-found
+                title: Resource not found
+                status: 404
+                detail: not found
+                instance: /buildings/bldg-1/shifts/shift-1/staffing-gap
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /associates/{id}/end-shift:
     post:
       operationId: endAssociateShift
@@ -610,6 +668,26 @@ components:
         type: string
         minLength: 1
       example: pack
+
+    BuildingId:
+      name: buildingId
+      in: path
+      required: true
+      description: The building whose committed shift plan to read.
+      schema:
+        type: string
+        minLength: 1
+      example: bldg-1
+
+    ShiftId:
+      name: shiftId
+      in: path
+      required: true
+      description: The shift (within buildingId) whose committed plan to read.
+      schema:
+        type: string
+        minLength: 1
+      example: shift-1
 
   responses:
     BadRequest:

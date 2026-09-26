@@ -1,0 +1,1 @@
+{"parameters":[{"name":"buildingId","in":"path","required":true,"description":"The building whose committed shift plan to read.","schema":{"type":"string","minLength":1},"example":"bldg-1"},{"name":"shiftId","in":"path","required":true,"description":"The shift (within buildingId) whose committed plan to read.","schema":{"type":"string","minLength":1},"example":"shift-1"}]}

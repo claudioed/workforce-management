@@ -31,12 +31,18 @@ import (
 var ErrUnknownPath = errors.New("pathcatalog: unknown process path id")
 
 // PathDefinition is one declared process path: its canonical id, the
-// lower-cased prefix family of real path_id values it recognizes, and
-// the capability set an associate must hold to be assigned to it.
+// lower-cased prefix family of real path_id values it recognizes, the
+// capability set an associate must hold to be assigned to it, and the
+// optional destination-location-role process-path-management declared for
+// it (Drop/WorkCenter/Shipping, or "" when undeclared/unset). This
+// service only carries the role through its read model today -- see
+// internal/adapters/outbound/kafkacatalog's package doc comment; nothing
+// in workforce-management yet branches on its value.
 type PathDefinition struct {
-	Id                   string
-	MatchPrefix          string
-	RequiredCapabilities []string
+	Id                      string
+	MatchPrefix             string
+	RequiredCapabilities    []string
+	DestinationLocationRole string
 }
 
 // Catalogue is the validated, in-memory set of a building's declared

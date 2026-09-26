@@ -172,6 +172,68 @@ func TestConsumer_Revised_UpdatesMatchPrefix(t *testing.T) {
 	}
 }
 
+// TestConsumer_DecodesDestinationLocationRole proves the previously-dropped
+// destination_location_role field is decoded and carried into the local
+// PathDefinition, so a caller reading it back via Lookup sees it.
+func TestConsumer_DecodesDestinationLocationRole(t *testing.T) {
+	reader := &fakeReader{
+		messages: []kafkago.Message{
+			envelopeMsg(t, 0, 0, eventTypeCreated, pathData{
+				PathId: "PACK", MatchPrefix: "pack", Direct: true,
+				RequiredCapabilities: []string{"pack"}, DestinationLocationRole: "Drop",
+			}),
+		},
+	}
+	c := newTestConsumer(reader, targetOffsets{0: 1})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	if err := c.WaitReady(ctx); err != nil {
+		t.Fatalf("expected Ready before timeout, got: %v", err)
+	}
+
+	def, err := c.Lookup("pack")
+	if err != nil {
+		t.Fatalf("expected pack to resolve, got: %v", err)
+	}
+	if def.DestinationLocationRole != "Drop" {
+		t.Fatalf("expected DestinationLocationRole %q, got %q", "Drop", def.DestinationLocationRole)
+	}
+}
+
+// TestConsumer_NoDestinationLocationRole_DecodesEmpty proves the field is
+// simply "" (not an error) when the producer omitted it -- the fully valid
+// DestinationLocationRoleUnset case on process-path-management's side.
+func TestConsumer_NoDestinationLocationRole_DecodesEmpty(t *testing.T) {
+	reader := &fakeReader{
+		messages: []kafkago.Message{
+			envelopeMsg(t, 0, 0, eventTypeCreated, pathData{
+				PathId: "PICK", MatchPrefix: "pick", Direct: true,
+				RequiredCapabilities: []string{"pick"},
+			}),
+		},
+	}
+	c := newTestConsumer(reader, targetOffsets{0: 1})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	if err := c.WaitReady(ctx); err != nil {
+		t.Fatalf("expected Ready before timeout, got: %v", err)
+	}
+
+	def, err := c.Lookup("pick")
+	if err != nil {
+		t.Fatalf("expected pick to resolve, got: %v", err)
+	}
+	if def.DestinationLocationRole != "" {
+		t.Fatalf("expected empty DestinationLocationRole, got %q", def.DestinationLocationRole)
+	}
+}
+
 func TestConsumer_UnknownEventType_IsIgnored(t *testing.T) {
 	reader := &fakeReader{
 		messages: []kafkago.Message{

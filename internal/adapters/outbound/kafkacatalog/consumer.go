@@ -28,6 +28,13 @@
 // pathcatalog.PathDefinition has NO Direct field (workforce-management
 // never needed it) -- the Kafka payload's "direct" field is read and
 // simply discarded here, not carried into the local PathDefinition.
+//
+// destination_location_role IS decoded and carried into the local
+// PathDefinition (added as wiring-only: process-path-management has
+// published this field since its own ADR on the topic, but this
+// consumer previously dropped it on the floor). An empty/absent value
+// decodes to "" (DestinationLocationRoleUnset on the producer's side),
+// which is a fully valid "no role declared" state, not an error.
 package kafkacatalog
 
 import (
@@ -76,10 +83,11 @@ type envelope struct {
 // pathcatalog.PathDefinition (see package doc comment) — it is decoded
 // and then simply discarded.
 type pathData struct {
-	PathId               string   `json:"path_id"`
-	MatchPrefix          string   `json:"match_prefix"`
-	Direct               bool     `json:"direct"`
-	RequiredCapabilities []string `json:"required_capabilities"`
+	PathId                  string   `json:"path_id"`
+	MatchPrefix             string   `json:"match_prefix"`
+	Direct                  bool     `json:"direct"`
+	RequiredCapabilities    []string `json:"required_capabilities"`
+	DestinationLocationRole string   `json:"destination_location_role"`
 }
 
 // Reader is the subset of *kafkago.Reader this Consumer needs, so tests
@@ -352,9 +360,10 @@ func (c *Consumer) applyUpsert(data pathData) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.paths[strings.ToUpper(data.PathId)] = pathcatalog.PathDefinition{
-		Id:                   data.PathId,
-		MatchPrefix:          data.MatchPrefix,
-		RequiredCapabilities: data.RequiredCapabilities,
+		Id:                      data.PathId,
+		MatchPrefix:             data.MatchPrefix,
+		RequiredCapabilities:    data.RequiredCapabilities,
+		DestinationLocationRole: data.DestinationLocationRole,
 	}
 }
 

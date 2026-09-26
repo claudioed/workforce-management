@@ -1,0 +1,69 @@
+---
+id: list-staffing-gaps-for-shift
+title: "List the staffing gap for every path planned within one committed shift plan (fleet-wide, all-paths view)"
+description: "ADR-0011's deferred fast-follow: a fleet-wide 'all paths, one building/shift' list endpoint, for contexts that need every path's staffing gap for a building+shift in one call rather than one request per path. Reuses the exact same per-path computation as GET /paths/{pathId}/staffing-gap — the two can never disagree for a given path — and raises PathUnderstaffed for every understaffed path in the plan. This surfaces the gaps only — it never decides or performs a rebalance; that stays a human call recorded via POST /associates/{id}/assignments."
+sidebar_label: "List the staffing gap for every path planned within one committed shift plan (fleet-wide, all-paths view)"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "get api-method"
+info_path: docs/api-reference/rest/workforce-management-api
+custom_edit_url: null
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"List the staffing gap for every path planned within one committed shift plan (fleet-wide, all-paths view)"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"get"}
+  path={"/buildings/{buildingId}/shifts/{shiftId}/staffing-gap"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+ADR-0011's deferred fast-follow: a fleet-wide "all paths, one building/shift" list endpoint, for contexts that need every path's staffing gap for a building+shift in one call rather than one request per path. Reuses the exact same per-path computation as GET /paths/\{pathId\}/staffing-gap — the two can never disagree for a given path — and raises PathUnderstaffed for every understaffed path in the plan. This surfaces the gaps only — it never decides or performs a rebalance; that stays a human call recorded via POST /associates/\{id\}/assignments.
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./list-staffing-gaps-for-shift.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./list-staffing-gaps-for-shift.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./list-staffing-gaps-for-shift.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      
