@@ -1230,6 +1230,133 @@ func TestGetStaffingGap_ObservedIdlePctNilOnErrIdleShareUnavailable(t *testing.T
 	}
 }
 
+// --- ADR-0011 fast-follow: fleet-wide staffing-gap list -----------------
+
+// TestGetStaffingGap_ExecuteAll_ReturnsGapForEveryPlannedPath proves the
+// list endpoint's use case reuses the exact same per-path computation as
+// Execute (same PlannedHeads/ActiveHeads/Understaffed for a given path,
+// gathered for every line in the committed plan in one call).
+func TestGetStaffingGap_ExecuteAll_ReturnsGapForEveryPlannedPath(t *testing.T) {
+	f := newFixtures()
+	commit := &CommitShiftPlan{ShiftPlans: f.shiftPlans, Events: f.pub, Clock: f.clock, InstalledCapacity: &fakeInstalledCapacityClient{capacityByPath: map[shared.PathId]int{"pack": 5, "pick": 5}}, MaxHoursPerShift: 8}
+	lines := []shiftplan.PathPlan{
+		{PathId: "pack", PlannedHeads: 3, PlannedRate: 30, PlannedHours: 24},
+		{PathId: "pick", PlannedHeads: 1, PlannedRate: 25, PlannedHours: 8},
+	}
+	if _, err := commit.Execute(context.Background(), "bldg-1", "shift-1", lines, map[shared.PathId]int{"pack": 5, "pick": 5}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	setupCertifiedAssociate(t, f, "assoc-1", "pick")
+	if _, err := (&AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}).Execute(context.Background(), "assoc-1", "pick"); err != nil {
+		t.Fatalf("setup assign: %v", err)
+	}
+
+	uc := &GetStaffingGap{ShiftPlans: f.shiftPlans, Assignments: f.assignments, Events: f.pub, Clock: f.clock}
+	gaps, err := uc.ExecuteAll(context.Background(), "bldg-1", "shift-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gaps) != 2 {
+		t.Fatalf("expected 2 gaps (one per planned path), got %d: %+v", len(gaps), gaps)
+	}
+
+	byPath := map[shared.PathId]StaffingGap{}
+	for _, g := range gaps {
+		byPath[g.PathId] = g
+	}
+	pack, ok := byPath["pack"]
+	if !ok || !pack.Understaffed || pack.PlannedHeads != 3 || pack.ActiveHeads != 0 {
+		t.Fatalf("unexpected pack gap: %+v (ok=%v)", pack, ok)
+	}
+	pick, ok := byPath["pick"]
+	if !ok || pick.Understaffed || pick.PlannedHeads != 1 || pick.ActiveHeads != 1 {
+		t.Fatalf("unexpected pick gap: %+v (ok=%v)", pick, ok)
+	}
+
+	// Cross-check against the single-path Execute for the same inputs --
+	// the two must never drift, since ExecuteAll reuses Execute's exact
+	// per-path core.
+	single, err := uc.Execute(context.Background(), "bldg-1", "shift-1", "pack")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if single != pack {
+		t.Fatalf("ExecuteAll's pack gap %+v diverges from Execute's %+v", pack, single)
+	}
+}
+
+// TestGetStaffingGap_ExecuteAll_PublishesEveryUnderstaffedPathInOneScope
+// proves every PathUnderstaffed event across the whole plan is raised, and
+// that they are batched into ONE UnitOfWork scope rather than one per
+// line -- mirroring the outbox's atomic-batch discipline (ADR 0016).
+func TestGetStaffingGap_ExecuteAll_PublishesEveryUnderstaffedPathInOneScope(t *testing.T) {
+	f := newFixtures()
+	commit := &CommitShiftPlan{ShiftPlans: f.shiftPlans, Events: &scopedPublisher{}, Clock: f.clock, InstalledCapacity: &fakeInstalledCapacityClient{capacityByPath: map[shared.PathId]int{"pack": 5, "pick": 5}}, MaxHoursPerShift: 8}
+	lines := []shiftplan.PathPlan{
+		{PathId: "pack", PlannedHeads: 2, PlannedRate: 30, PlannedHours: 16},
+		{PathId: "pick", PlannedHeads: 1, PlannedRate: 25, PlannedHours: 8},
+	}
+	if _, err := commit.Execute(context.Background(), "bldg-1", "shift-1", lines, map[shared.PathId]int{"pack": 5, "pick": 5}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	pub := &scopedPublisher{}
+	uow := &recordingUnitOfWork{}
+	uc := &GetStaffingGap{ShiftPlans: f.shiftPlans, Assignments: f.assignments, Events: pub, Clock: f.clock, UnitOfWork: uow}
+	gaps, err := uc.ExecuteAll(context.Background(), "bldg-1", "shift-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gaps) != 2 {
+		t.Fatalf("expected 2 gaps, got %d", len(gaps))
+	}
+	// Both lines are understaffed (0 active each) -- exactly one scope,
+	// carrying both events, not two separate scopes.
+	assertOneCommittedScope(t, uow, pub)
+	if pub.events != 2 {
+		t.Fatalf("expected 2 PathUnderstaffed events published in the one scope, got %d", pub.events)
+	}
+}
+
+// TestGetStaffingGap_ExecuteAll_PlanNotFound mirrors Execute's own
+// not-found behavior for the same missing (buildingId, shiftId).
+func TestGetStaffingGap_ExecuteAll_PlanNotFound(t *testing.T) {
+	f := newFixtures()
+	uc := &GetStaffingGap{ShiftPlans: f.shiftPlans, Assignments: f.assignments, Events: f.pub, Clock: f.clock}
+	if _, err := uc.ExecuteAll(context.Background(), "bldg-1", "shift-1"); !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// TestGetStaffingGap_ExecuteAll_NoUnderstaffedPaths_OpensNoScope mirrors
+// Execute's "a fully staffed path opens no scope" behavior across every
+// line in the plan.
+func TestGetStaffingGap_ExecuteAll_NoUnderstaffedPaths_OpensNoScope(t *testing.T) {
+	f := newFixtures()
+	setupCertifiedAssociate(t, f, "assoc-1", "pack")
+	if _, err := (&AssignLabor{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}).Execute(context.Background(), "assoc-1", "pack"); err != nil {
+		t.Fatalf("setup assign: %v", err)
+	}
+	commit := &CommitShiftPlan{ShiftPlans: f.shiftPlans, Events: f.pub, Clock: f.clock, InstalledCapacity: &fakeInstalledCapacityClient{capacityByPath: map[shared.PathId]int{"pack": 5}}, MaxHoursPerShift: 8}
+	lines := []shiftplan.PathPlan{{PathId: "pack", PlannedHeads: 1, PlannedRate: 30, PlannedHours: 8}}
+	if _, err := commit.Execute(context.Background(), "bldg-1", "shift-1", lines, map[shared.PathId]int{"pack": 5}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	uow := &recordingUnitOfWork{}
+	uc := &GetStaffingGap{ShiftPlans: f.shiftPlans, Assignments: f.assignments, Events: f.pub, Clock: f.clock, UnitOfWork: uow}
+	gaps, err := uc.ExecuteAll(context.Background(), "bldg-1", "shift-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gaps) != 1 || gaps[0].Understaffed {
+		t.Fatalf("expected 1 fully-staffed gap, got %+v", gaps)
+	}
+	if uow.opened != 0 {
+		t.Fatalf("no path understaffed must open no scope, got opened=%d", uow.opened)
+	}
+}
+
 func TestEndAssociateShift_AssociateNotFound(t *testing.T) {
 	f := newFixtures()
 	uc := &EndAssociateShift{Associates: f.associates, Assignments: f.assignments, Events: f.pub, Clock: f.clock, MaxHoursPerShift: 8}

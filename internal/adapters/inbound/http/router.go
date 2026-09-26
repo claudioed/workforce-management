@@ -111,6 +111,7 @@ func NewRouter(h *Handler, logger *slog.Logger, serviceName string, opts ...Rout
 	r.Post("/associates/{id}/break/start", h.startBreak)
 	r.Post("/associates/{id}/break/end", h.endBreak)
 	r.Get("/paths/{pathId}/staffing-gap", h.staffingGap)
+	r.Get("/buildings/{buildingId}/shifts/{shiftId}/staffing-gap", h.staffingGapForShift)
 	r.Post("/associates/{id}/end-shift", h.endShift)
 
 	return r
@@ -367,6 +368,31 @@ func (h *Handler) staffingGap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toStaffingGapResponse(gap))
+}
+
+// staffingGapForShift answers GET /buildings/{buildingId}/shifts/{shiftId}/staffing-gap
+// -- the fleet-wide "all paths, one building/shift" list ADR-0011 flagged
+// as a deferred fast-follow ("the shipped screen exposes a real gap in
+// this context's own read-model surface (no list-by-building/shift
+// endpoint)"). It answers the staffing gap for EVERY path planned in the
+// committed shift plan, reusing the exact same per-path computation as
+// the single-path lookup above (GetStaffingGap.ExecuteAll).
+//
+// buildingId/shiftId are chi PATH parameters here (unlike the single-path
+// lookup's query parameters above): chi never matches a {param} route
+// segment against an empty string, so there is no empty-value case to
+// validate for either -- a malformed request simply 404s before reaching
+// this handler at all.
+func (h *Handler) staffingGapForShift(w http.ResponseWriter, r *http.Request) {
+	buildingId := chi.URLParam(r, "buildingId")
+	shiftId := chi.URLParam(r, "shiftId")
+
+	gaps, err := h.GetStaffingGap.ExecuteAll(r.Context(), buildingId, shiftId)
+	if err != nil {
+		writeError(w, r, statusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toStaffingGapResponses(gaps))
 }
 
 func (h *Handler) endShift(w http.ResponseWriter, r *http.Request) {

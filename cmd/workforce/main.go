@@ -379,12 +379,24 @@ func newEventPublisher(pool *pgxpool.Pool, shiftPlans ports.ShiftPlanRepo, logge
 		sink := kafka.NewRelaySink(brokers)
 		relay := postgres.NewOutboxRelay(pool, sink, logger,
 			postgres.WithInterval(envDurationOrDefault("OUTBOX_RELAY_INTERVAL", time.Second)))
+		// workforce.outbox.lag_seconds (ADR 0016's flagged follow-up):
+		// only meaningful when the outbox is actually the publish path,
+		// so it is registered here alongside the relay, not unconditionally.
+		lagGaugeReg, err := postgres.RegisterOutboxLagGauge(pool)
+		if err != nil {
+			logger.Error("failed to register outbox lag gauge", "error", err)
+		}
 		logger.Info("event publisher configured", "publisher", "kafka", "mode", "outbox",
 			"brokers", brokers, "topic", kafka.Topic, "analytics_topic", kafka.AnalyticsTopic)
 		return postgres.NewOutboxPublisher(pool, integration, analytics), relay, func() {
 			closeDirect()
 			if err := sink.Close(); err != nil {
 				logger.Error("kafka relay sink close failed", "error", err)
+			}
+			if lagGaugeReg != nil {
+				if err := lagGaugeReg.Unregister(); err != nil {
+					logger.Warn("outbox lag gauge unregister failed", "error", err)
+				}
 			}
 		}, nil
 	case "log":

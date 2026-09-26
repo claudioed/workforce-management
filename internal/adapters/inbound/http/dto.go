@@ -96,6 +96,16 @@ func toStaffingGapResponse(g usecases.StaffingGap) staffingGapResponse {
 	}
 }
 
+// toStaffingGapResponses maps a fleet-wide "all paths, one building/shift"
+// list (ADR-0011's deferred fast-follow) to its wire form.
+func toStaffingGapResponses(gaps []usecases.StaffingGap) []staffingGapResponse {
+	out := make([]staffingGapResponse, len(gaps))
+	for i, g := range gaps {
+		out[i] = toStaffingGapResponse(g)
+	}
+	return out
+}
+
 // problemDetails is the RFC 7807 (Problem Details for HTTP APIs) response
 // body used for every error response in this service.
 type problemDetails struct {
