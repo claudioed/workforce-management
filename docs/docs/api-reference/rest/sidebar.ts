@@ -98,6 +98,12 @@ const sidebar: SidebarsConfig = {
           label: "Get the staffing gap for a path within a committed shift plan",
           className: "api-method get",
         },
+        {
+          type: "doc",
+          id: "api-reference/rest/list-staffing-gaps-for-shift",
+          label: "List the staffing gap for every path planned within one committed shift plan (fleet-wide, all-paths view)",
+          className: "api-method get",
+        },
       ],
     },
     {

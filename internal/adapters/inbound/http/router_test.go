@@ -545,6 +545,57 @@ func TestStaffingGap_ObservedIdlePctSurfacedOverHTTP(t *testing.T) {
 	}
 }
 
+// --- ADR-0011 fast-follow: GET /buildings/{buildingId}/shifts/{shiftId}/staffing-gap ---
+
+// TestStaffingGapForShift_ListsEveryPlannedPath is the HTTP-layer proof
+// that the fleet-wide list endpoint answers every path in the committed
+// plan, matching the single-path lookup's per-path values exactly.
+func TestStaffingGapForShift_ListsEveryPlannedPath(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	req := commitShiftPlanRequest{
+		BuildingId: "bldg-1",
+		ShiftId:    "shift-1",
+		Lines: []pathPlanLineRequest{
+			{PathId: "pack", PlannedHeads: 3, PlannedRate: 30, PlannedHours: 24, InstalledStations: 10},
+			{PathId: "pick", PlannedHeads: 1, PlannedRate: 25, PlannedHours: 8, InstalledStations: 10},
+		},
+	}
+	doRequest(t, router, http.MethodPost, "/shift-plans", req)
+
+	rec := doRequest(t, router, http.MethodGet, "/buildings/bldg-1/shifts/shift-1/staffing-gap", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp []staffingGapResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp) != 2 {
+		t.Fatalf("expected 2 entries (one per planned path), got %d: %+v", len(resp), resp)
+	}
+	byPath := map[string]staffingGapResponse{}
+	for _, g := range resp {
+		byPath[g.PathId] = g
+	}
+	if pack, ok := byPath["pack"]; !ok || !pack.Understaffed || pack.PlannedHeads != 3 {
+		t.Fatalf("unexpected pack entry: %+v (ok=%v)", pack, ok)
+	}
+	if pick, ok := byPath["pick"]; !ok || !pick.Understaffed || pick.PlannedHeads != 1 {
+		t.Fatalf("unexpected pick entry: %+v (ok=%v)", pick, ok)
+	}
+}
+
+// TestStaffingGapForShift_UnknownPlan_Returns404 mirrors the single-path
+// lookup's not-found behavior for a (buildingId, shiftId) with no
+// committed plan.
+func TestStaffingGapForShift_UnknownPlan_Returns404(t *testing.T) {
+	router := NewRouter(newTestHandler(), testLogger, "")
+	rec := doRequest(t, router, http.MethodGet, "/buildings/bldg-1/shifts/shift-1/staffing-gap", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestEndShift(t *testing.T) {
 	router := NewRouter(newTestHandler(), testLogger, "")
 	doRequest(t, router, http.MethodPost, "/associates/assoc-1/start-shift", startShiftRequest{})
