@@ -147,7 +147,7 @@ passes.
 
 - A shift-plan commit can no longer silently overcommit past
   fulfillment-execution's REAL Station registry — the exact class of gap
-  this fleet's Amazon Process Path Model review flagged.
+  this fleet's process-path model review flagged.
 - The two checks (`installedStations`, `installedCapacity`) stay legible
   independently: a test or an operator reading a rejection knows
   immediately which one failed (`ErrPlannedHeadsExceedInstalled` vs

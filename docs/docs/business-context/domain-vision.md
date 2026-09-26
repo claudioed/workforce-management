@@ -19,7 +19,7 @@ particular from its last clause.
 
 ## Why labor is its own bounded context
 
-The Amazon-fulfillment DDD reference model classifies **Labor & Workforce Management** as a **Supporting** subdomain:
+The e-commerce-fulfillment DDD reference model classifies **Labor & Workforce Management** as a **Supporting** subdomain:
 "allocates workforce to workload; important, industry-common." It is
 genuinely necessary — you cannot plan a shift without knowing your headcount —
 but nobody wins the market on their break-tracking code.

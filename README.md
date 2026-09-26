@@ -5,7 +5,7 @@
 > follows real industry-standard patterns and terminology (WMS/WES/WCS,
 > certification-gated assignment, CloudEvents, RFC 7807, hexagonal
 > architecture) but is **not a production system** and is **not affiliated
-> with, endorsed by, or representative of Amazon or any other company**.
+> with, endorsed by, or representative of any real-world company**.
 
 A Supporting bounded context that owns "who is on shift, on which process
 path, at what rate; direct vs indirect hours." It covers the shift-start

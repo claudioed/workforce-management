@@ -12,7 +12,7 @@ description: Supporting subdomain — the justification, and what follows from i
 
 ## The justification
 
-The Amazon-fulfillment DDD reference classifies subdomains by competitive
+The e-commerce-fulfillment DDD reference classifies subdomains by competitive
 differentiation, and puts labor squarely in the Supporting bucket:
 
 | Subdomain | Type | Why |
