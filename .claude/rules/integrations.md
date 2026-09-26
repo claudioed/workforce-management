@@ -9,8 +9,18 @@
   service, malformed response, genuinely no data yet) collapses to the
   single sentinel `ErrMeasuredRateUnavailable`, and the use case falls back
   to the caller-supplied rate. Selected via `LABOR_PERFORMANCE_MODE`
-  (`http`|`permissive`, default `permissive` — never reaches the network)
-  and `LABOR_PERFORMANCE_BASE_URL`.
+  (`http`|`kafka-cache`|`permissive`, default `permissive` — never reaches
+  the network) and `LABOR_PERFORMANCE_BASE_URL` (http mode).
+  `kafka-cache` (ADR-0019) swaps the HTTP call for
+  `outbound/laborperformancecache`: an in-memory cache fed by
+  `warehouse.labor-performance.events` (`TaskPerformanceRecorded`), replayed
+  from the earliest offset under a per-process-unique consumer group, with a
+  60s `WaitReady` gate at boot. Requires `KAFKA_BROKERS`.
+- **`IdleShareClient`** (ADR-0020) — the observed idle share per path's task
+  type. **Only `kafka-cache` provides one**; `http`/`permissive` leave it nil.
+  `GetStaffingGap` surfaces it as `observedIdlePct`; `ProposePathPlan` trims
+  the proposal when it exceeds `IDLE_SHARE_TRIM_THRESHOLD` (default 0.30).
+  Fail-open via `ErrIdleShareUnavailable` (surface nothing / trim nothing).
 - **`InstalledCapacityClient`** (ADR-0014) — queries `fulfillment-execution`
   for the real, live count of registered stations holding a path's
   capability, so `CommitShiftPlan` enforces `plannedHeads` against physical
@@ -44,19 +54,25 @@ published-language file (`warehouse-infra/config/process-paths/*.yaml`).
   (default `/etc/workforce-management/process-paths.yaml`) once at startup.
   A missing/invalid file is a **fatal boot-time error**.
 - `outbound/kafkacatalog` — an alternative, Kafka-sourced catalogue adapter
-  implementing the same `ports.PathCatalogue` interface.
+  implementing the same `ports.PathCatalogue` interface, selected with
+  `PATH_CATALOGUE_SOURCE=kafka` (default `file`). It replays
+  `process-path-management`'s `warehouse.process-path-management.events`
+  (`ProcessPathCreated`/`Updated`/`Deactivated`) from the earliest offset under
+  a per-process consumer group, and blocks boot up to 60s (`WaitReady`).
+  Requires `KAFKA_BROKERS`.
 
 ## Kafka integration events + transactional outbox (ADR-0004, ADR-0016)
 
 This service publishes `ShiftPlanCommitted` to the shared warehouse-systems
 Kafka broker; `wes-work-planning` projects it into its own
-`LaborPlanObserved` read model, keyed by `path_id`. This round it only
-publishes — it does not consume anything on the integration side.
+`LaborPlanObserved` read model, keyed by `path_id`. On the consuming side,
+the only inbound topics are the two opt-in cache feeds above
+(`kafkacatalog`, `laborperformancecache`); neither writes to Postgres.
 
 - **Topic**: `warehouse.workforce.events`. **Broker**: `KAFKA_BROKERS`
-  (default `localhost:9092`, shared cluster started via
-  `~/warehouse-systems/docker-compose.kafka.yml` — this repo's own
-  `docker-compose.yml` only runs Postgres).
+  (default `localhost:9092`, the fleet's one shared broker — in-cluster in
+  the `warehouse-infra` kind cluster; this repo's own `docker-compose.yml`
+  only runs Postgres).
 - **Selection**: `EVENT_PUBLISHER=kafka` to publish; default `log` keeps
   tests/local runs broker-free.
 - **Delivery** (ADR-0016, transactional outbox): with `EVENT_PUBLISHER=kafka`
@@ -71,8 +87,8 @@ publishes — it does not consume anything on the integration side.
   with 3 lines publishes 3 Kafka messages, one per line, each carrying that
   line's `planned_heads`/`planned_rate`/`planned_hours` plus the plan's
   `building_id`/`shift_id`. Consumers must expect N messages per commit.
-- **Envelope** (flat cross-service shape, shared fleet-wide, see this repo's
-  `INTEGRATION.md`):
+- **Envelope** (flat cross-service shape, shared fleet-wide, originally
+  specified in this repo's `INTEGRATION.md`):
 
 ```json
 {

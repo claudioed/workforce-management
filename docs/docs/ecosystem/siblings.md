@@ -1,15 +1,17 @@
 ---
 id: siblings
-title: The five services
-sidebar_label: The five services
+title: Sibling services
+sidebar_label: Sibling services
 sidebar_position: 3
 description: What each bounded context in warehouse-systems owns, in its own vocabulary.
 ---
 
-# The five services
+# Sibling services
 
-All five are Go services with the same hexagonal layering, the same
-`golangci-lint` config, the same RFC 7807 error format and the same
+This page describes the original five services in detail. The fleet has grown
+since then. The later additions are summarised under
+[Later additions](#later-additions). All of them are Go services with the same
+hexagonal layering, the same RFC 7807 error format and the same
 Postgres + Kafka stack. They share no code and no database.
 
 ## inventory-storage — WMS tier, **Core**
@@ -86,9 +88,26 @@ separately in `inventory-storage` (to accept a stow) and in the WES tier (for
 travel-path and congestion reasoning), model it once and have both call into
 it.
 
-The newest of the five, and currently standalone — no service consumes it yet.
+`inventory-storage`, `wes-work-planning` and `fulfillment-execution` now read
+locations or travel distances from it. This service does not.
 
 Aggregates: `Site`, `Zone`, `Aisle`, `LocationSlot`, `PlacementRule`.
+
+## Later additions
+
+- **order-management** — order intake, allocation, promise dates and release:
+  the upstream Open Host Service for the WMS/WES tiers. No edge to this service.
+- **process-path-management** — the operator-configurable process-path
+  catalogue (Generic). It publishes `warehouse.process-path-management.events`,
+  which this service consumes when `PATH_CATALOGUE_SOURCE=kafka`.
+- **labor-performance** — engineered labor standards and actual-vs-standard
+  scoring. This service reads measured rates and idle share from it, either
+  from `warehouse.labor-performance.events` (`kafka-cache`) or over HTTP.
+- **warehouse-ops-agent** — read-side decision support. It calls this service's
+  MCP tools (`get_staffing_gap`, `propose_path_heads`) and reads its labor
+  report.
+- **network-fulfillment** — the anti-corruption layer to an external
+  fulfillment network, feeding `order-management`. No edge to this service.
 
 ## The tiering, at a glance
 

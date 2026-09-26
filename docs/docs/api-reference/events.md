@@ -256,4 +256,16 @@ An associate's active assignment was ended in favour of another path.
 
 ## What this service consumes
 
-Nothing. There is no inbound Kafka adapter and no consumer group in this repo.
+From siblings, two opt-in topics. Each is replayed from the earliest offset
+into an in-memory cache under a per-process consumer group. Neither is
+written to Postgres.
+
+| Topic | Producer | Event types used | Enabled by | Adapter |
+| --- | --- | --- | --- | --- |
+| `warehouse.process-path-management.events` | `process-path-management` | `ProcessPathCreated`, `ProcessPathUpdated`, `ProcessPathDeactivated` | `PATH_CATALOGUE_SOURCE=kafka` | `internal/adapters/outbound/kafkacatalog` |
+| `warehouse.labor-performance.events` | `labor-performance` | `TaskPerformanceRecorded` | `LABOR_PERFORMANCE_MODE=kafka-cache` | `internal/adapters/outbound/laborperformancecache` |
+
+Internally, the analytics projector (`cmd/workforce-projector`) consumes this
+service's own `warehouse.workforce.analytics` topic under the group
+`workforce-analytics`. It dedupes on `event_id` via the
+`analytics_processed_events` table in the analytical database. See [Integration](../ecosystem/integration.md).

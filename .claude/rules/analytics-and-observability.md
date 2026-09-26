@@ -82,7 +82,7 @@ enforced by `TestSetupDoesNotBlockWithoutACollector`, not just convention.
 |---|---|
 | Traces | one server span per HTTP request, named by **route pattern** (`POST /associates/{id}/assignments`), not raw path — bounds span-name cardinality |
 | Traces | a client child span per Postgres round-trip via `otelpgx`, carrying **parameterized** SQL only (never literal values) |
-| Traces | a `kafka.publish warehouse.workforce.events` producer span, W3C trace context injected into Kafka headers so a consumer's span is a child |
+| Traces | with `EVENT_PUBLISHER=kafka`, W3C trace context is captured into each outbox row's headers when the event is raised; the relay's `kafka.publish outbox` producer span forwards those headers untouched, so a consumer's span parents onto the originating request's trace (ADR-0016) |
 | Metrics | `http.server.request.duration` (histogram, seconds, OTel HTTP semconv) |
 | Metrics | `workforce.labor_assignments` (counter) — every `AssignLabor` attempt, attributed `workforce.assignment.outcome=accepted\|rejected`, `workforce.path.id`, and on rejection `workforce.assignment.reason` (`uncertified`, `on_break`, `shift_ended`, `max_hours_exceeded`, `associate_not_found`, `internal_error`) |
 | Metrics | Go runtime metrics (goroutines, GC, memory) |

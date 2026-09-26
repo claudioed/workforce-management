@@ -20,11 +20,12 @@ No framework type and no SQL type appears anywhere in `internal/domain`.
 flowchart LR
   subgraph inbound["Inbound adapters (driving)"]
     HTTP["chi HTTP handlers<br/>DTOs, RFC 7807 mapping"]
+    MCP["MCP server<br/>(cmd/mcp)"]
   end
 
   subgraph app["Application"]
     UC["8 use cases<br/>one struct each"]
-    P["Ports (OUT)<br/>AssociateRepo, ShiftPlanRepo,<br/>AssignmentRepo, EventPublisher, Clock"]
+    P["Ports (OUT)<br/>repos, EventPublisher, UnitOfWork, Clock,<br/>PathCatalogue, InstalledCapacityClient,<br/>MeasuredRateClient, IdleShareClient"]
   end
 
   subgraph domain["Domain (pure Go)"]
@@ -32,6 +33,7 @@ flowchart LR
     S["shiftplan<br/>ShiftPlan / PathPlan"]
     L["assignment<br/>LaborAssignment"]
     SH["shared<br/>ids, certifications, events"]
+    PC["pathcatalog<br/>process-path catalogue"]
   end
 
   subgraph outbound["Outbound adapters (driven)"]
@@ -39,10 +41,12 @@ flowchart LR
     MEM["memory<br/>in-memory repos"]
     EV["events<br/>log / buffered publisher"]
     KA["kafka<br/>segmentio/kafka-go"]
+    SIB["sibling clients + caches<br/>fulfillment-execution, labor-performance,<br/>process-path catalogue"]
     CL["clock<br/>system clock"]
   end
 
   HTTP --> UC
+  MCP --> UC
   UC --> A
   UC --> S
   UC --> L
@@ -52,28 +56,44 @@ flowchart LR
   MEM -.implements.-> P
   EV -.implements.-> P
   KA -.implements.-> P
+  SIB -.implements.-> P
   CL -.implements.-> P
 ```
 
 ## Package map
 
 ```
-cmd/workforce/                composition root — env config, wiring, main()
+cmd/workforce/                OLTP service — env config, wiring, outbox relay, main()
+cmd/workforce-reports/        analytical data product read API (GET /reports/labor)
+cmd/workforce-projector/      consumes warehouse.workforce.analytics into the report projection
+cmd/mcp/                      MCP server (Streamable HTTP) over the same use cases
 internal/
   domain/
     associate/                 AssociateShift aggregate (roster, certifications, breaks)
     shiftplan/                 ShiftPlan aggregate (committed headcount split across paths)
     assignment/                LaborAssignment aggregate (one associate, one path, an interval)
+    pathcatalog/               process-path catalogue model (ADR 0013)
     shared/                    value objects: AssociateId, PathId, Certification, domain events
   application/
-    ports/                     OUT: AssociateRepo, ShiftPlanRepo, AssignmentRepo, EventPublisher, Clock
+    ports/                     OUT: repos, EventPublisher, UnitOfWork, ProcessedEvents, Clock,
+                               PathCatalogue, InstalledCapacityClient, MeasuredRateClient, IdleShareClient
     usecases/                  one struct per use case
+  analytics/report/            labor report read model + ports (ADR 0010)
   adapters/
     inbound/http/              chi handlers, DTOs, error mapping
-    outbound/postgres/         pgxpool repos
+    inbound/mcp/               MCP tools, resources, prompts
+    inbound/kafka/             analytics-topic consumer for the projector
+    outbound/postgres/         pgxpool repos, unit of work, transactional outbox + relay
     outbound/memory/           in-memory repos for tests and local runs
     outbound/events/           log/buffered publisher
-    outbound/kafka/            Kafka publisher (segmentio/kafka-go)
+    outbound/kafka/            Kafka publishers (segmentio/kafka-go)
+    outbound/analyticsstore/   analytical projection + report store
+    outbound/fulfillmentexecution/  installed-capacity client (ADR 0014)
+    outbound/laborperformance/      measured-rate HTTP client (ADR 0012)
+    outbound/laborperformancecache/ event-fed measured-rate + idle-share cache (ADR 0019, 0020)
+    outbound/filecatalog/      process-path catalogue from a YAML file
+    outbound/kafkacatalog/     process-path catalogue from process-path-management's topic
+    outbound/telemetry/        OpenTelemetry setup
     outbound/clock/            system clock
   architecture/                arch-go fitness tests for the rules above
 migrations/                    golang-migrate SQL files
@@ -102,27 +122,32 @@ review comment. See [ADR 0007](../adr/0007-arch-go-architecture-fitness-tests.md
 | --- | --- |
 | `StartAssociateShift` | Opens a roster entry with initial certifications |
 | `CertifyAssociate` | Adds one certification to an existing roster entry |
-| `ProposePathPlan` | Pure computation: `heads = ceil(charge ÷ plannedRate)`. Persists nothing |
-| `CommitShiftPlan` | Validates and commits the headcount split; publishes `ShiftPlanCommitted` |
+| `ProposePathPlan` | Advisory computation: `heads = ceil(charge ÷ rate)`, using the caller's rate or a measured one from `labor-performance`, optionally trimmed by observed idle share. Persists nothing |
+| `CommitShiftPlan` | Validates the headcount split (including the live installed-capacity ceiling from `fulfillment-execution`) and commits it; publishes `ShiftPlanCommitted` |
 | `AssignLabor` | Puts an associate on a path, closing any prior active assignment |
 | `StartBreak` / `EndBreak` | Opens and closes a logged break |
-| `GetStaffingGap` | Read model: planned heads versus active assignments for a path |
+| `GetStaffingGap` | Read model: planned heads versus active assignments for a path, plus observed idle share when available |
 | `EndAssociateShift` | Closes active assignments, then the shift |
 
 `ProposePathPlan` is deliberately the odd one out: it touches no repository at
 all, because a proposal is advisory. The software proposes; a human commits.
+(It may read measured rates and idle share from `labor-performance`, but it
+writes nothing.)
 
 ## Quality gates
 
-Every one of these runs in CI on every push and pull request:
+These run in `.github/workflows/ci.yml`; unless noted, on every push and pull request:
 
 | Gate | Tool |
 | --- | --- |
 | Lint | `golangci-lint` (errcheck, govet, staticcheck, unused, ineffassign, bodyclose, misspell, unconvert, gocritic) |
 | Unit tests + race | `go test ./... -race`, coverage ≥ 90% on domain + application |
-| Postgres integration | build-tagged tests against a live Postgres 16 service container |
+| Integration | build-tagged tests against a live Postgres 16 service container, plus testcontainers-backed outbox and Kafka-consumer tests |
 | Architecture fitness | `arch-go` via `internal/architecture` |
 | BDD acceptance | `godog` over the real chi router |
 | OpenAPI + AsyncAPI lint | Spectral, against `apis/*.yaml` |
-| Helm chart lint | `ct lint` |
+| Helm chart lint | `ct lint` — pull requests into `main` only |
 | Mutation testing | `gremlins` — weekly and on manual dispatch, never blocking PRs |
+| Drift | `deadcode`, `go mod tidy -diff`, `knip` on `web/` — weekly and on manual dispatch |
+| Generated API docs | `docs-api-drift` regenerates `docs/docs/api-reference/rest` and fails on a diff |
+| Vulnerabilities / image | `govulncheck`; Trivy image scan (pull requests into `main` only) |

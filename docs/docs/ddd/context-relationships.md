@@ -18,7 +18,9 @@ wiring-level detail (topics, envelopes, env vars) see
 | Counterpart | Pattern | Direction | Wired today? |
 | --- | --- | --- | --- |
 | `wes-work-planning` | **Customer/Supplier** — this context supplies, Work Planning consumes | Publish only, one-way | **Yes** — `ShiftPlanCommitted` on `warehouse.workforce.events` |
-| `fulfillment-execution` | **Deliberate non-relationship** at the write boundary; read-only conformance on certifications | None | **No — by design** |
+| `fulfillment-execution` | **Deliberate non-relationship** at the task/write boundary; **Conformist** read of installed capacity | This context reads `GET /capacity/{capability}` | **Yes, capacity only** — [ADR 0014](../adr/0014-installed-capacity-ceiling.md) |
+| `labor-performance` | **Conformist** on measured rates and idle share | Consume `warehouse.labor-performance.events` (`kafka-cache`) or `GET /task-types/{taskType}/performance` (`http`) | **Yes, opt-in** — [ADR 0012](../adr/0012-measured-rate-feed-for-propose-path-plan.md), [0019](../adr/0019-labor-performance-cache-consumer.md), [0020](../adr/0020-idle-share-staffing-signal.md) |
+| `process-path-management` | **Conformist** on the process-path catalogue | Consume `warehouse.process-path-management.events` | **Yes, opt-in** (`PATH_CATALOGUE_SOURCE=kafka`); otherwise a file |
 | `inventory-storage` | None | — | No |
 | `facility-layout` | Would be **Conformist** if physical location ever mattered here; it does not | — | No |
 
@@ -35,7 +37,8 @@ That is a fact this context owns, and it is published as
 Three properties make this a clean Customer/Supplier edge rather than a
 coupling:
 
-**It is asynchronous and one-way.** This service publishes to a topic and
+**It is asynchronous and one-way.** This service publishes to a topic (via
+the transactional outbox, [ADR 0016](../adr/0016-transactional-outbox.md)) and
 forgets. It has no client for Work Planning, no retry against it, no knowledge
 of whether anyone is listening. A Supporting context must never become a
 runtime availability risk to a Core one.
@@ -56,14 +59,22 @@ state. What the customer gets is the *plan*, not the roster.
 
 ## `fulfillment-execution` — the non-relationship, and why it matters
 
-**There is no direct integration between this context and
-`fulfillment-execution`.** No topic, no HTTP call, no shared table, in either
-direction.
+**At the level of tasks and people, there is no integration between this
+context and `fulfillment-execution`.** No task, claim, associate identity or
+assignment crosses between them, in either direction, and there is no shared
+table.
+
+The one live edge is narrow and physical. On every `CommitShiftPlan`, this
+context reads `fulfillment-execution`'s installed station count for each
+path's capability (`GET /capacity/{capability}`) and treats it as a ceiling on
+planned heads ([ADR 0014](../adr/0014-installed-capacity-ceiling.md)). This
+makes it a downstream Conformist on a *count*, not on the task model.
 
 This is an ecosystem fact worth stating explicitly, because both services deal
-in "people doing work" and a reader will reasonably expect an edge between
-them. The absence is the [path boundary](../business-context/path-boundary.md)
-made visible in the context map.
+in "people doing work" and a reader will reasonably expect a wider edge between
+them. That the edge stays this narrow is the
+[path boundary](../business-context/path-boundary.md) made visible in the
+context map.
 
 What the two contexts share is a *concept*, not a contract:
 
