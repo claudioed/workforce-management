@@ -91,7 +91,22 @@ across clients and **SHOULD** be used rather than leaving procedure implicit.
 
 ## 7. Security & authorization (current posture: no IdP)
 
-Per ADR-0008, the current posture for these internal, non-user-facing servers:
+:::warning Not implemented in this repository
+
+The static-bearer-key posture below was implemented here
+([ADR-0017](../adr/0017-adopt-fleet-rest-identity.md)) and then **removed**
+([ADR-0018](../adr/0018-remove-fleet-rest-identity.md)). Today every route on
+`cmd/mcp` is **unauthenticated at this layer**: the Streamable HTTP endpoint
+at `/` and `/mcp`, and `/healthz`. No `MCP_READ_KEY`/`MCP_READWRITE_KEY` is
+read, and no tool, resource or prompt is scope-gated. Access control relies
+on network-level boundaries (in-cluster ClusterIP Service). Items 1, 2 and 4
+below, and the scope/`client_id` fields of the audit record in §9, describe
+the charter's target rather than current behaviour here. Re-adopting them
+would need a new ADR.
+
+:::
+
+Per ADR-0008, the charter's posture for these internal, non-user-facing servers:
 
 1. Every request **MUST** be authenticated with a static bearer API key held in
    a Kubernetes Secret. Missing/invalid key **MUST** return `401`.

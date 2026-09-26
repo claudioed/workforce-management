@@ -55,9 +55,11 @@ internal/
     associate/                 AssociateShift aggregate
     shiftplan/                 ShiftPlan aggregate
     assignment/                LaborAssignment aggregate
+    pathcatalog/               process-path catalogue model (prefix-match Lookup), ADR-0013
     shared/                    value objects + domain events
   application/
-    ports/                     AssociateRepo, ShiftPlanRepo, AssignmentRepo, EventPublisher, ProcessedEvents, Clock
+    ports/                     repos, EventPublisher, UnitOfWork, ProcessedEvents, Clock,
+                               MeasuredRateClient, IdleShareClient, InstalledCapacityClient, PathCatalogue
     usecases/                  one struct per use case
   analytics/
     report/                    Labor Utilization & Staffing read model + ports (depends on nothing)
@@ -70,7 +72,12 @@ internal/
     outbound/memory/            in-memory repos for tests/local
     outbound/events/            log/buffered publisher + multi (fan-out) publisher
     outbound/clock/             system clock
-    outbound/kafka/             integration publisher + analytics publisher + trace-context header carrier
+    outbound/kafka/             integration publisher + analytics publisher + outbox relay sink + trace-context header carrier
+    outbound/fulfillmentexecution/  InstalledCapacityClient: GET /capacity/{capability} (ADR-0014)
+    outbound/laborperformance/      MeasuredRateClient over HTTP (ADR-0012)
+    outbound/laborperformancecache/ event-fed measured-rate + idle-share cache (ADR-0019, ADR-0020)
+    outbound/filecatalog/           process-path catalogue from a YAML file (ADR-0013)
+    outbound/kafkacatalog/          process-path catalogue fed by process-path-management's topic
     outbound/telemetry/         OTel setup (traces/metrics) + trace-aware slog handler
 migrations/                   golang-migrate SQL files (OLTP)
 migrations/analytics/         golang-migrate SQL files (analytical DB, owned by the projector)
@@ -92,10 +99,12 @@ migrations/analytics/         golang-migrate SQL files (analytical DB, owned by 
   spec, so introducing one would be scope creep; the convention is documented
   here instead.
 - **`installedStations` is supplied by the caller** on `CommitShiftPlan`,
-  not looked up from another service. Work Planning owns installed-station
-  counts; this context enforces `plannedHeads <= installedStations`
-  independently (per its own invariant) but has no dependency on that
-  service, so the request carries the numbers it needs to validate against.
+  not looked up from Work Planning; this context enforces
+  `plannedHeads <= installedStations` independently (per its own invariant).
+  Since [ADR-0014](docs/docs/adr/0014-installed-capacity-ceiling.md) each line
+  is **also** checked against the live installed capacity fetched from
+  fulfillment-execution (`GET /capacity/{capability}`). This is a second,
+  independent ceiling that fails loud (503) when it cannot be verified.
 - **`GetStaffingGap` takes `buildingId`/`shiftId` as query parameters**
   (`GET /paths/{pathId}/staffing-gap?buildingId=&shiftId=`) because
   `ShiftPlan` is keyed by building + shift, and a path's planned heads only
@@ -109,8 +118,14 @@ migrations/analytics/         golang-migrate SQL files (analytical DB, owned by 
 ```bash
 docker compose up -d                 # Postgres 16 on localhost:5432
 export DATABASE_URL="postgres://workforce:workforce@localhost:5432/workforce?sslmode=disable"
+export PATH_CATALOGUE_FILE=./process-paths.yaml   # required: see PATH_CATALOGUE_FILE below
 go run ./cmd/workforce                # applies migrations, then serves on :8080
 ```
+
+`cmd/workforce` refuses to start without a readable process-path catalogue
+(copy `warehouse-infra`'s `config/process-paths/sortable-fc.yaml`, or see the
+minimal example in the
+[quickstart](docs/docs/overview/quickstart.md)).
 
 Env vars:
 
@@ -128,7 +143,9 @@ Env vars:
 | `IDLE_SHARE_TRIM_THRESHOLD` | no | `0.30` | Idle share (fraction, e.g. `0.3` = 30%) above which `ProposePathPlan` trims its proposed heads (idleness-as-staffing-signal, ADR-0020). Only takes effect when `LABOR_PERFORMANCE_MODE=kafka-cache` is also set — no other mode has an idle-share signal to trim against, so `ProposePathPlan` fails open (no trim) regardless of this value otherwise |
 | `INSTALLED_CAPACITY_MODE` | no | `permissive` | `http` or `permissive` — selects the `CommitShiftPlan` live installed-capacity ceiling client from fulfillment-execution (ADR-0014). Unlike `LABOR_PERFORMANCE_MODE`'s fail-open `permissive` default, this one is fail-LOUD: every `CommitShiftPlan` call is rejected until `http` mode is set, since a shift-plan commit mutates real state |
 | `FULFILLMENT_EXECUTION_BASE_URL` | when `INSTALLED_CAPACITY_MODE=http` | — | fulfillment-execution's base URL |
+| `PATH_CATALOGUE_SOURCE` | no | `file` | `file` loads `PATH_CATALOGUE_FILE` once at boot; `kafka` instead replays `process-path-management`'s `warehouse.process-path-management.events` topic into an in-memory catalogue (requires `KAFKA_BROKERS`; the service waits up to 60s for the replay before serving) |
 | `PATH_CATALOGUE_FILE` | no | `/etc/workforce-management/process-paths.yaml` | Path to the declared process-path catalogue YAML (see `warehouse-infra`'s `config/process-paths/sortable-fc.yaml`, the same file `fulfillment-execution` and `wes-work-planning` read). Loaded once at startup; a missing or invalid file is a fatal boot-time error — see [ADR-0013](docs/docs/adr/0013-process-path-catalogue-validation.md) |
+| `CORS_ALLOWED_ORIGINS` | no | `http://localhost:5173,http://localhost:5185` | comma-separated browser origins allowed by the CORS middleware |
 | `LOG_LEVEL` | no | `info` | `debug`\|`info`\|`warn`\|`error` (case-insensitive) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | `localhost:4317` | OTel Collector gRPC endpoint — see [Observability](#observability) |
 | `OTEL_SERVICE_NAME` | no | `workforce-management` | `service.name` resource attribute |
@@ -148,8 +165,9 @@ The OLTP service fans domain events onto a **separate** analytics topic
 topic and publisher are left untouched.
 
 ```bash
-# 1. shared broker already running (~/warehouse-systems/docker-compose.kafka.yml)
-#    and an analytical Postgres database reachable via ANALYTICS_DATABASE_URL.
+# 1. the fleet's shared broker reachable at localhost:9092 (the warehouse-infra
+#    kind cluster exposes it there) and an analytical Postgres database
+#    reachable via ANALYTICS_DATABASE_URL.
 
 # 2. OLTP service, fanning events onto the analytics topic:
 export EVENT_PUBLISHER=kafka
@@ -237,7 +255,10 @@ curl -X POST localhost:8080/paths/pack/plan/propose \
 # -> falls back to labor-performance's measured rate for PACK when
 #    LABOR_PERFORMANCE_MODE=http and data exists; otherwise 0 proposed heads.
 
-# Commit a shift plan (human-committed headcount split across paths)
+# Commit a shift plan (human-committed headcount split across paths).
+# Requires INSTALLED_CAPACITY_MODE=http: in the default permissive mode every
+# commit is rejected with 503 installed-capacity-unavailable (ADR-0014), and a
+# line whose plannedHeads exceeds fulfillment-execution's live capacity is 409.
 curl -X POST localhost:8080/shift-plans \
   -d '{"buildingId":"bldg-1","shiftId":"shift-1","lines":[
         {"pathId":"pack","plannedHeads":3,"plannedRate":30,"plannedHours":24,"installedStations":10}
@@ -252,6 +273,9 @@ curl -X POST localhost:8080/associates/assoc-1/break/start
 curl -X POST localhost:8080/associates/assoc-1/break/end
 
 # Staffing gap read model for a path within a committed plan
+# -> {"pathId":"pack","plannedHeads":3,"activeHeads":1,"understaffed":true}
+#    plus observedIdlePct when LABOR_PERFORMANCE_MODE=kafka-cache has a signal
+#    for the path (ADR-0020). Unknown path ids are 400 unknown-path-id.
 curl "localhost:8080/paths/pack/staffing-gap?buildingId=bldg-1&shiftId=shift-1"
 
 # End an associate's shift (closes any active assignment first)
@@ -294,13 +318,22 @@ This service can publish `ShiftPlanCommitted` to the shared warehouse-systems
 Kafka broker so other bounded contexts (e.g. `wes-work-planning`, which
 projects these into its own `LaborPlanObserved` read model, keyed by
 `path_id`) can react to committed headcount without calling back into this
-service. This round it only publishes — it does not consume anything.
+service. Inbound, it can optionally consume `process-path-management`'s
+catalogue topic (`PATH_CATALOGUE_SOURCE=kafka`) and `labor-performance`'s
+`warehouse.labor-performance.events` (`LABOR_PERFORMANCE_MODE=kafka-cache`),
+each into an in-memory cache rebuilt from the earliest offset under a
+per-process consumer group. It also makes two synchronous calls:
+fulfillment-execution's `GET /capacity/{capability}` (`INSTALLED_CAPACITY_MODE=http`)
+and labor-performance's `GET /task-types/{taskType}/performance`
+(`LABOR_PERFORMANCE_MODE=http`). See
+[docs/docs/ecosystem/integration.md](docs/docs/ecosystem/integration.md) for
+the full edge list.
 
 - **Topic**: `warehouse.workforce.events`
-- **Broker**: `KAFKA_BROKERS` (default `localhost:9092`) — points at the
-  shared broker started separately via
-  `~/warehouse-systems/docker-compose.kafka.yml`; this repo's own
-  `docker-compose.yml` only runs Postgres.
+- **Broker**: `KAFKA_BROKERS` (default `localhost:9092`) — the fleet's one
+  shared broker (in the `warehouse-infra` kind cluster, exposed on the host
+  at `localhost:9092`); this repo's own `docker-compose.yml` only runs
+  Postgres.
 - **Selection**: `EVENT_PUBLISHER=kafka` to publish to Kafka, `EVENT_PUBLISHER=log`
   (default) to keep publishing to the in-memory/log publisher used by tests
   and local runs that don't need cross-service integration.
@@ -337,7 +370,7 @@ service. This round it only publishes — it does not consume anything.
 Smoke test against the shared broker:
 
 ```bash
-# shared broker already running: ~/warehouse-systems/docker-compose.kafka.yml
+# shared broker reachable at localhost:9092 (warehouse-infra kind cluster)
 export EVENT_PUBLISHER=kafka
 export KAFKA_BROKERS=localhost:9092
 go run ./cmd/workforce
@@ -348,8 +381,9 @@ curl -X POST localhost:8080/shift-plans \
         {"pathId":"pick","plannedHeads":2,"plannedRate":25,"plannedHours":16,"installedStations":10}
       ]}'
 
-# in another terminal, confirm 2 messages landed on the topic:
-docker exec warehouse-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+# in another terminal, confirm 2 messages landed on the topic (any Kafka CLI
+# pointed at the shared broker, e.g. kubectl exec into kafka-controller-0):
+kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 --topic warehouse.workforce.events --from-beginning --max-messages 2
 ```
 
@@ -378,7 +412,7 @@ That is enforced by a test
 |--------|------|
 | Traces | one server span per HTTP request, named by **route pattern** (`POST /associates/{id}/assignments`), not the raw path, so span-name cardinality stays bounded by the route table |
 | Traces | a client child span per Postgres round-trip via `otelpgx`, carrying the **parameterized** SQL (`$1`, `$2`, … — literal values are never recorded) |
-| Traces | a `kafka.publish warehouse.workforce.events` producer span, with W3C trace context injected into each message's Kafka headers so a consumer's span is a child of ours |
+| Traces | with `EVENT_PUBLISHER=kafka`, the W3C trace context is captured into each outbox row's headers when the event is raised; the relay's `kafka.publish outbox` producer span forwards those headers untouched, so a consumer's span parents onto the originating request's trace |
 | Metrics | `http.server.request.duration` (histogram, seconds, OTel HTTP semconv) |
 | Metrics | `workforce.labor_assignments` (counter) — every `AssignLabor` attempt, attributed `workforce.assignment.outcome=accepted\|rejected`, `workforce.path.id`, and on rejection `workforce.assignment.reason` (`uncertified`, `on_break`, `shift_ended`, `max_hours_exceeded`, `associate_not_found`, `internal_error`) |
 | Metrics | Go runtime metrics (goroutines, GC, memory) via `contrib/instrumentation/runtime` |

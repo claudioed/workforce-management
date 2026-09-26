@@ -56,6 +56,7 @@ domain layer knows nothing about HTTP.
 | `404 Not Found` | `ports.ErrNotFound` — the associate or the committed plan does not exist |
 | `409 Conflict` | A domain invariant refused the operation. The request was well-formed; the domain said no |
 | `500 Internal Server Error` | Anything unmapped — a repository or publisher failure |
+| `503 Service Unavailable` | `CommitShiftPlan` could not verify installed capacity against `fulfillment-execution` ([ADR 0014](../adr/0014-installed-capacity-ceiling.md)) — retry later |
 
 `409` is the interesting one. It is used for **every** invariant rejection —
 certification missing, associate on break, planned heads over installed
@@ -73,6 +74,7 @@ Base URI: `https://errors.workforce-management.warehouse-systems.dev`
 | --- | --- | --- |
 | `/empty-associate-id` | Associate id must not be empty | `shared.ErrEmptyAssociateId` |
 | `/empty-path-id` | Path id must not be empty | `shared.ErrEmptyPathId` |
+| `/unknown-path-id` | Unrecognized process-path id | `pathcatalog.ErrUnknownPath` |
 | `/empty-certification` | Certification must not be empty | `shared.ErrEmptyCertification` |
 | `/missing-building-id` | buildingId is required | HTTP-layer sentinel |
 | `/missing-shift-id` | shiftId is required | HTTP-layer sentinel |
@@ -97,6 +99,7 @@ Base URI: `https://errors.workforce-management.warehouse-systems.dev`
 | `/associate-shift-ended` | Associate shift has already ended | `associate.ErrShiftEnded` |
 | `/max-hours-exceeded` | Max hours per shift exceeded | `associate.ErrMaxHoursExceeded` |
 | `/planned-heads-exceed-installed` | Planned heads exceed installed stations for path | `shiftplan.ErrPlannedHeadsExceedInstalled` |
+| `/exceeds-installed-capacity` | Planned heads exceed the live installed capacity reported by fulfillment-execution | `shiftplan.ErrExceedsInstalledCapacity` |
 | `/planned-hours-exceed-capacity` | Planned hours exceed capacity for planned heads within max hours per shift | `shiftplan.ErrPlannedHoursExceedCapacity` |
 
 ### `500` — unmapped
@@ -104,6 +107,12 @@ Base URI: `https://errors.workforce-management.warehouse-systems.dev`
 | `type` suffix | `title` |
 | --- | --- |
 | `/internal-error` | Internal server error |
+
+### `503` — dependency unavailable
+
+| `type` suffix | `title` | Sentinel |
+| --- | --- | --- |
+| `/installed-capacity-unavailable` | Could not verify installed capacity against fulfillment-execution | `ports.ErrInstalledCapacityUnavailable` |
 
 ## Worked example: the certification gate
 

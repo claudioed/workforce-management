@@ -34,7 +34,8 @@ internal/
     shared/                     value objects: AssociateId, PathId, Certification, events
   application/
     ports/                      OUT: repos, EventPublisher, UnitOfWork, ProcessedEvents,
-                                 Clock, MeasuredRateClient, InstalledCapacityClient, PathCatalogue
+                                 Clock, MeasuredRateClient, IdleShareClient, InstalledCapacityClient,
+                                 PathCatalogue
     usecases/                   one struct per use case (see rules/domain-model.md)
   analytics/report/             Labor Utilization & Staffing read model + ports — depends on nothing
   adapters/
@@ -45,11 +46,12 @@ internal/
     outbound/analyticsstore/      analytical projection writer + read-only reader + memory store
     outbound/memory/              in-memory repos for tests/local
     outbound/events/              log/buffered publisher + multi (fan-out) publisher
-    outbound/kafka/               integration publisher + analytics publisher + trace-context carrier
+    outbound/kafka/               integration + analytics publishers, outbox relay sink, trace-context carrier
     outbound/fulfillmentexecution/  InstalledCapacityClient HTTP client (ADR-0014)
     outbound/laborperformance/      MeasuredRateClient HTTP client (ADR-0012)
+    outbound/laborperformancecache/ event-fed measured-rate + idle-share cache (ADR-0019, ADR-0020)
     outbound/filecatalog/           loads the process-path catalogue YAML (ADR-0013)
-    outbound/kafkacatalog/          Kafka-sourced alternative catalogue adapter
+    outbound/kafkacatalog/          Kafka-sourced catalogue adapter (PATH_CATALOGUE_SOURCE=kafka)
     outbound/clock/                 system clock
     outbound/telemetry/             OTel setup (traces/metrics) + trace-aware slog handler
 migrations/                    golang-migrate SQL files (OLTP, incl. outbox table)
@@ -61,9 +63,9 @@ Deep-dive references, split out so this file stays a short index:
 
 - **rules/domain-model.md** — ubiquitous language, aggregates & invariants,
   domain events, use cases, REST API surface.
-- **rules/integrations.md** — outbound HTTP clients (measured rate, installed
-  capacity), the process-path catalogue, Kafka events + transactional outbox,
-  CORS.
+- **rules/integrations.md** — outbound clients (measured rate, idle share,
+  installed capacity), the process-path catalogue, the two opt-in consumed
+  topics, Kafka events + transactional outbox, CORS.
 - **rules/analytics-and-observability.md** — the analytics data product
   (ADR-0010), the MCP inbound adapter (ADR-0008), OTel traces/metrics/logs.
 - **rules/frontend.md** — the `web/` micro-frontend remote.
@@ -73,7 +75,8 @@ Deep-dive references, split out so this file stays a short index:
 ```bash
 # Run the OLTP service (Postgres required)
 docker compose up -d
-export DATABASE_URL="postgres://workforce:***@localhost:5432/workforce?sslmode=disable"
+export DATABASE_URL="postgres://workforce:workforce@localhost:5432/workforce?sslmode=disable"
+export PATH_CATALOGUE_FILE=./process-paths.yaml   # required; see docs quickstart
 go run ./cmd/workforce                # :8080, applies migrations on boot
 
 # Fast pre-commit loop (no DB needed, ~1 min)
@@ -89,7 +92,7 @@ make mutation-full   # exhaustive gremlins over internal/domain (scheduled)
 make integration  # needs Postgres/DATABASE_URL; outbox tests use testcontainers
 
 # Docs site (Docusaurus, generates REST reference from apis/openapi.yaml)
-cd docs && npm ci && npm run gen-api-docs -- all && npm run build
+cd docs && npm ci && npm run gen-api-docs && npm run build
 ```
 
 `make help` lists every target; each mirrors a `.github/workflows/ci.yml` job
@@ -135,7 +138,8 @@ regardless since hooks are per-clone.
   associate) rejected; assignment without required certification rejected;
   assignment while on an active break rejected.
 - If `apis/openapi.yaml` changed, regenerate the docs site reference pages:
-  `cd docs && npm run gen-api-docs -- all` and commit the result — see
+  `cd docs && npm run gen-api-docs` and commit the result (CI's
+  `docs-api-drift` job fails on any diff) — see
   `docs/package.json`'s `gen-api-docs` script. `apis/asyncapi.yaml` has no
   generated pages today; its narrative counterpart is
   `docs/docs/ecosystem/integration.md` — update both together.

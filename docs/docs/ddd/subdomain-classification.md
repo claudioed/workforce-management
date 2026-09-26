@@ -45,10 +45,14 @@ heuristic, no scoring function anywhere in this codebase — because the
 interesting decisions (who to move, when) belong to humans and to other
 contexts.
 
-**Take dependencies out, not in.** This service has no synchronous dependency
-on any sibling. `installedStations` arrives in the request rather than being
-fetched from `wes-work-planning`, precisely so that a Supporting context never
-becomes a runtime risk to a Core one.
+**Take dependencies out, not in.** No Core context depends on this service at
+runtime. `installedStations` arrives in the request rather than being fetched
+from `wes-work-planning`, precisely so that a Supporting context never becomes
+a runtime risk to a Core one. The dependencies this service does take are
+reads *into* it: `fulfillment-execution`'s live installed capacity on commit
+([ADR 0014](../adr/0014-installed-capacity-ceiling.md)), and measured rates /
+idle share from `labor-performance`. When the capacity read fails, only this
+service's own commit fails.
 
 **Keep the surface small.** Ten endpoints, three aggregates, eight use cases.
 Every addition would have to earn its place against the fact that this is not
