@@ -3,12 +3,29 @@ id: integration
 title: Integration
 sidebar_label: Integration
 sidebar_position: 4
-description: The one topic this service publishes, the envelope on the wire, and how to smoke-test it.
+description: The topics this service publishes and consumes, its two synchronous sibling calls, the envelope on the wire, and how to smoke-test it.
 ---
 
 # Integration
 
-One topic out. Nothing in. No synchronous call to any sibling.
+One integration topic out (plus a separate analytics topic). Up to two topics
+in and up to two synchronous calls to siblings, each selected by an env var
+and off by default. The table below lists every edge in
+`cmd/workforce/main.go`.
+
+| Direction | Counterpart | Mechanism | Selected by | Default |
+| --- | --- | --- | --- | --- |
+| Out | `wes-work-planning` | Kafka `warehouse.workforce.events` (`ShiftPlanCommitted`) | `EVENT_PUBLISHER=kafka` | `log` (no broker) |
+| Out | own analytics projector | Kafka `warehouse.workforce.analytics` (every domain event) | `EVENT_PUBLISHER=kafka` | `log` |
+| In (sync) | `fulfillment-execution` | `GET /capacity/{capability}` on every `CommitShiftPlan` ([ADR 0014](../adr/0014-installed-capacity-ceiling.md)) | `INSTALLED_CAPACITY_MODE=http` + `FULFILLMENT_EXECUTION_BASE_URL` | `permissive` = **every commit fails with 503** |
+| In (sync) | `labor-performance` | `GET /task-types/{taskType}/performance` when `ProposePathPlan` has no caller rate ([ADR 0012](../adr/0012-measured-rate-feed-for-propose-path-plan.md)) | `LABOR_PERFORMANCE_MODE=http` + `LABOR_PERFORMANCE_BASE_URL` | `permissive` = no measured rate (fail-open) |
+| In (async) | `labor-performance` | Kafka `warehouse.labor-performance.events` (`TaskPerformanceRecorded`) into an in-memory cache ([ADR 0019](../adr/0019-labor-performance-cache-consumer.md), [ADR 0020](../adr/0020-idle-share-staffing-signal.md)) | `LABOR_PERFORMANCE_MODE=kafka-cache` + `KAFKA_BROKERS` | off |
+| In (async) | `process-path-management` | Kafka `warehouse.process-path-management.events` (`ProcessPathCreated`/`Updated`/`Deactivated`) into the in-memory process-path catalogue | `PATH_CATALOGUE_SOURCE=kafka` + `KAFKA_BROKERS` | `file` (`PATH_CATALOGUE_FILE`) |
+
+The `warehouse-infra` kind cluster sets `INSTALLED_CAPACITY_MODE=http` and
+`LABOR_PERFORMANCE_MODE=kafka-cache`, and sets `PATH_CATALOGUE_SOURCE=kafka`
+when its `deploy_process_path_kafka_source` flag is on. All of these edges are
+therefore live there.
 
 ## What is published
 
@@ -97,9 +114,10 @@ for the reasoning and the migration path.
 
 ## Smoke-testing the edge
 
-A shared broker runs at `localhost:9092` via
-`~/warehouse-systems/docker-compose.kafka.yml`. This repo's own
-`docker-compose.yml` only runs Postgres — do not add a broker to it.
+The fleet runs one shared Kafka broker: the in-cluster release in the
+`warehouse-infra` kind cluster, reachable from the host at `localhost:9092`.
+This repo's own `docker-compose.yml` only runs Postgres — do not add a broker
+to it.
 
 ```bash
 export EVENT_PUBLISHER=kafka
@@ -113,8 +131,9 @@ curl -X POST localhost:8080/shift-plans \
         {"pathId":"pick","plannedHeads":2,"plannedRate":25,"plannedHours":16,"installedStations":10}
       ]}'
 
-# in another terminal
-docker exec warehouse-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+# in another terminal (any Kafka CLI pointed at the shared broker, e.g.
+# kubectl exec into kafka-controller-0 in the warehouse-systems namespace)
+kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 \
   --topic warehouse.workforce.events \
   --from-beginning --max-messages 2
@@ -135,9 +154,44 @@ that nobody has asked: no sibling consumes roster or break events today.
 
 ## What is consumed
 
-Nothing. This service has no inbound Kafka adapter and no consumer group.
+Two sibling topics, both **opt-in** and both used only to build an in-memory
+cache that the `cmd/workforce` process rebuilds from the earliest offset on
+every start:
 
-That is a real architectural property, not a to-do: with no inbound event
-stream there is no idempotency machinery to get right, no `processed_events`
-table, and no redelivery semantics to reason about. `wes-work-planning`, which
-does consume, carries all of that.
+- **`warehouse.process-path-management.events`**
+  (`internal/adapters/outbound/kafkacatalog`, `PATH_CATALOGUE_SOURCE=kafka`).
+  It replaces the boot-time `PATH_CATALOGUE_FILE` read. Path ids on propose,
+  commit, assign and staffing-gap requests are validated against this cache
+  ([ADR 0013](../adr/0013-process-path-catalogue-validation.md)).
+- **`warehouse.labor-performance.events`**
+  (`internal/adapters/outbound/laborperformancecache`,
+  `LABOR_PERFORMANCE_MODE=kafka-cache`). It supplies measured rates to
+  `ProposePathPlan` and the observed idle share to `GetStaffingGap` and
+  `ProposePathPlan`.
+
+Both consumers use a **per-process-unique consumer group** (prefix + host +
+PID + timestamp), so every process replays the full history. Before serving
+traffic, each one waits up to 60s (`WaitReadyTimeout`) for the replay to catch
+up. Neither writes to Postgres, so there is no processed-events table on the
+OLTP side. The only dedupe table (`analytics_processed_events`) belongs to
+the analytics projector
+(`cmd/workforce-projector`), which consumes this service's own
+`warehouse.workforce.analytics` topic under the fixed group
+`workforce-analytics`.
+
+## Synchronous calls to siblings
+
+- **`fulfillment-execution` — `GET /capacity/{capability}`**
+  (`internal/adapters/outbound/fulfillmentexecution`). It is called for every
+  line of every `CommitShiftPlan` and is **fail-loud**: any failure rejects the
+  whole commit with `503 installed-capacity-unavailable`. The default
+  `permissive` client always fails, so a commit only succeeds when
+  `INSTALLED_CAPACITY_MODE=http`.
+- **`labor-performance` — `GET /task-types/{taskType}/performance`**
+  (`internal/adapters/outbound/laborperformance`). It is called only when
+  `LABOR_PERFORMANCE_MODE=http` and `ProposePathPlan` gets no positive
+  `plannedRate`. It is **fail-open**: on any failure the proposal falls back to
+  the caller rate.
+
+Both clients send no `Authorization` header
+([ADR 0018](../adr/0018-remove-fleet-rest-identity.md)).

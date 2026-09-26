@@ -8,15 +8,44 @@ description: Bring up Postgres, run the service, and walk one shift end to end w
 
 # Run it locally
 
-The service is a single Go binary. It needs Postgres; Kafka is optional and
-off by default.
+The OLTP service is `cmd/workforce`. It needs Postgres and a process-path
+catalogue file. Kafka is optional and off by default.
 
 ## 1. Start Postgres and the service
+
+The service refuses to boot without a process-path catalogue
+([ADR 0013](../adr/0013-process-path-catalogue-validation.md)). The default
+path, `/etc/workforce-management/process-paths.yaml`, rarely exists on a
+laptop, so point `PATH_CATALOGUE_FILE` at a local copy. The canonical file is
+`warehouse-infra`'s `config/process-paths/sortable-fc.yaml`. A minimal
+equivalent:
+
+```yaml
+# process-paths.yaml
+building: local
+paths:
+  - id: PACK
+    matchPrefix: pack
+    requiredCapabilities: [pack]
+  - id: PICK
+    matchPrefix: pick
+    requiredCapabilities: [pick]
+```
+
+`CommitShiftPlan` also checks every line against the live installed capacity
+in `fulfillment-execution`
+([ADR 0014](../adr/0014-installed-capacity-ceiling.md)). In the default
+`permissive` mode every commit fails with `503 installed-capacity-unavailable`.
+To commit a plan, point the service at a `fulfillment-execution` that has
+stations registered for the path:
 
 ```bash
 docker compose up -d   # Postgres 16 on localhost:5432
 
 export DATABASE_URL="postgres://workforce:workforce@localhost:5432/workforce?sslmode=disable"
+export PATH_CATALOGUE_FILE=./process-paths.yaml
+export INSTALLED_CAPACITY_MODE=http
+export FULFILLMENT_EXECUTION_BASE_URL=http://localhost:8000/api/fulfillment-execution   # e.g. via the kind cluster's Kong
 go run ./cmd/workforce   # applies migrations, then serves on :8080
 ```
 
@@ -30,8 +59,17 @@ Everything is environment-driven — there is no config file.
 | `HTTP_ADDR` | no | `:8080` | listen address |
 | `MIGRATIONS_PATH` | no | `migrations` | path to the golang-migrate SQL files |
 | `MAX_HOURS_PER_SHIFT` | no | `8` | the configured max-hours-per-shift cap |
+| `PATH_CATALOGUE_SOURCE` | no | `file` | `file` reads `PATH_CATALOGUE_FILE` once at boot; `kafka` replays `process-path-management`'s topic instead (requires `KAFKA_BROKERS`) |
+| `PATH_CATALOGUE_FILE` | with `file` source | `/etc/workforce-management/process-paths.yaml` | process-path catalogue YAML; missing or invalid is a fatal boot error |
+| `INSTALLED_CAPACITY_MODE` | no | `permissive` | `http` or `permissive`. **Permissive rejects every `CommitShiftPlan` with `503`** |
+| `FULFILLMENT_EXECUTION_BASE_URL` | with `http` capacity mode | — | `fulfillment-execution` base URL |
+| `LABOR_PERFORMANCE_MODE` | no | `permissive` | `http`, `kafka-cache` or `permissive` — measured-rate / idle-share feed for `ProposePathPlan` and `GetStaffingGap` |
 | `EVENT_PUBLISHER` | no | `log` | `log` or `kafka` — see [Integration](../ecosystem/integration.md) |
 | `KAFKA_BROKERS` | no | `localhost:9092` | comma-separated broker list, used when `EVENT_PUBLISHER=kafka` |
+
+The README's env table lists the remaining knobs (`LABOR_PERFORMANCE_BASE_URL`,
+`IDLE_SHARE_TRIM_THRESHOLD`, `OUTBOX_RELAY_INTERVAL`, `CORS_ALLOWED_ORIGINS`,
+OTel variables).
 
 ## 3. Walk one shift end to end
 
@@ -48,7 +86,9 @@ curl -X POST localhost:8080/associates/assoc-1/certifications \
 curl -X POST localhost:8080/paths/pack/plan/propose \
   -d '{"buildingId":"bldg-1","charge":100,"plannedRate":30}'
 
-# 4. A human commits the split (this is the ShiftPlan)
+# 4. A human commits the split (this is the ShiftPlan). Needs
+#    INSTALLED_CAPACITY_MODE=http and reported capacity >= 3 for pack;
+#    otherwise 503 (capacity unavailable) or 409 (exceeds-installed-capacity).
 curl -X POST localhost:8080/shift-plans \
   -d '{"buildingId":"bldg-1","shiftId":"shift-1","lines":[
         {"pathId":"pack","plannedHeads":3,"plannedRate":30,"plannedHours":24,"installedStations":10}
@@ -78,6 +118,11 @@ Step 7 returns the staffing-gap read model — planned versus active, and the
 {"pathId":"pack","plannedHeads":3,"activeHeads":1,"understaffed":true}
 ```
 
+With `LABOR_PERFORMANCE_MODE=kafka-cache` the response can also carry
+`observedIdlePct`: the path's recently observed idle share, taken from
+`labor-performance`. It is omitted when there is no signal
+([ADR 0020](../adr/0020-idle-share-staffing-signal.md)).
+
 That flag is the whole point of this context's intra-shift half: it says the
 gap exists. It does not move anybody. See
 [Why it stops at the path boundary](../business-context/path-boundary.md).
@@ -91,8 +136,10 @@ go test ./...
 go test ./... -race
 gofmt -l .                      # should print nothing
 
-# Postgres integration tests (build-tagged, skipped without DATABASE_URL)
-go test -tags=integration ./internal/adapters/outbound/postgres/...
+# Integration tests (build-tagged). Postgres repo tests skip without
+# DATABASE_URL; outbox and Kafka-consumer tests start their own containers
+# via testcontainers (Docker required).
+go test -tags=integration ./...
 
 # Gherkin acceptance specs, driven through the real HTTP surface
 go test ./... -run TestFeatures -v

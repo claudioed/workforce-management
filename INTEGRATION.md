@@ -1,5 +1,13 @@
 # Cross-service integration (additive — Task 7, do NOT touch existing domain code)
 
+> **Historical brief.** This is the original Task 7 specification and is kept
+> as the source of the flat envelope shape. The "does not need to consume
+> anything" and `docker-compose.kafka.yml` statements below describe that
+> round only. For the current edges (two opt-in consumed topics, two
+> synchronous sibling reads, the transactional outbox, the in-cluster shared
+> broker), see `docs/docs/ecosystem/integration.md` and
+> `.claude/rules/integrations.md`.
+
 This service PUBLISHES `ShiftPlanCommitted` over Kafka to a shared broker. This
 round it does not need to consume anything. Strictly additive: new adapter
 only, no change to existing aggregates, invariants, or use cases.

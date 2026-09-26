@@ -3,16 +3,18 @@ id: context-map
 title: Context map
 sidebar_label: Context map
 sidebar_position: 2
-description: What is actually wired between the five services today, and what is only strategically related.
+description: What is actually wired between this service and its siblings today, and what is only strategically related.
 ---
 
 # Context map
 
 ## What is actually wired today
 
-Solid arrows are live Kafka topics with a real producer and a real consumer in
-the code as it stands. Dashed arrows are strategic relationships with **no**
-implementation.
+Solid arrows are live edges with real code on both ends: Kafka topics with a
+real producer and consumer, and synchronous HTTP reads (labelled `GET`).
+Dashed arrows are strategic relationships with **no** implementation. The
+diagram shows this service's own edges plus the sibling edges that give it
+context. It is not the full fleet map.
 
 ```mermaid
 flowchart TB
@@ -34,29 +36,57 @@ flowchart TB
     FL["facility-layout<br/><i>Generic — Open Host Service</i><br/>Site to Zone to Aisle to LocationSlot"]
   end
 
+  subgraph SUP["Supporting siblings this service reads from"]
+    PPM["process-path-management<br/>process-path catalogue"]
+    LP["labor-performance<br/>measured rates, idle share"]
+  end
+
+  AG["warehouse-ops-agent<br/>MCP client"]
+
+  FL -- "location reads" --> INV
+  FL -- "travel-distance reads" --> WP
+  FL -- "location reads" --> FE
+
   WFM -- "warehouse.workforce.events<br/>ShiftPlanCommitted<br/>(one message per PathPlan line)" --> WP
   INV -- "warehouse.inventory.events<br/>StockReserved, ReservationRevoked" --> WP
   WP -- "warehouse.work-planning.events<br/>WorkReleased" --> FE
   FE -- "warehouse.fulfillment.events<br/>TaskCompleted" --> WP
 
-  FL -. "Open Host Service —<br/>no live consumer yet" .-> INV
-  FL -. "no live consumer yet" .-> WP
-  FL -. "no live consumer yet" .-> FE
-
-  WFM x-. "NO integration —<br/>deliberate, see the path boundary" .-x FE
+  WFM -- "GET /capacity/{capability}<br/>installed-capacity ceiling on commit" --> FE
+  PPM -- "warehouse.process-path-management.events<br/>(PATH_CATALOGUE_SOURCE=kafka)" --> WFM
+  LP -- "warehouse.labor-performance.events<br/>TaskPerformanceRecorded (kafka-cache)" --> WFM
+  WFM -. "GET /task-types/{taskType}/performance<br/>(LABOR_PERFORMANCE_MODE=http)" .-> LP
+  AG -- "MCP: get_staffing_gap,<br/>propose_path_heads" --> WFM
 
   class INV,WP,FE core
-  class WFM supporting
+  class WFM,PPM,LP supporting
   class FL generic
 ```
 
 ## Reading the diagram
 
-**One outbound edge, zero inbound edges.** This service publishes
-`ShiftPlanCommitted` and consumes nothing. It has no Kafka consumer, no HTTP
-client for any sibling, and no shared database. A Supporting context that
-sits in nobody's critical path is a Supporting context that can be deployed,
-restarted or rolled back without a change-control conversation.
+**One topic published, reads from three siblings, no shared database.** This
+service publishes `ShiftPlanCommitted`. It *reads from* siblings in three
+ways, each selected by an env var (see [Integration](./integration.md)):
+
+- the live installed capacity from `fulfillment-execution` on every
+  `CommitShiftPlan` ([ADR 0014](../adr/0014-installed-capacity-ceiling.md));
+- measured rates and idle share from `labor-performance`, either from its
+  topic (`kafka-cache`, as in the kind cluster) or over HTTP
+  ([ADR 0012](../adr/0012-measured-rate-feed-for-propose-path-plan.md),
+  [0019](../adr/0019-labor-performance-cache-consumer.md),
+  [0020](../adr/0020-idle-share-staffing-signal.md));
+- the process-path catalogue from `process-path-management`'s topic, when
+  `PATH_CATALOGUE_SOURCE=kafka`. Otherwise it comes from a file.
+
+In every one of these edges, data flows *into* this service. The only
+callers of this service are read-only: `wes-work-planning` consumes the topic,
+and `warehouse-ops-agent` calls two MCP tools (`get_staffing_gap`,
+`propose_path_heads`) and reads the labor report (`GET /reports/labor`). No
+sibling invokes one of this service's commands, so it is still in no Core
+context's write path. The reverse no longer holds, though: `CommitShiftPlan`
+now depends on `fulfillment-execution` being reachable, and fails loud (503)
+when it is not.
 
 **The `wes-work-planning` edge is the supply side of planning.** Work Planning
 is the conductor — it decides what work to release and when, and it
@@ -65,18 +95,19 @@ one of its inputs, and this service is the authoritative source of it. The edge
 carries the *plan*, never the roster: no associate identity, no break state, no
 individual assignment ever crosses it.
 
-**The crossed edge to `fulfillment-execution` is the important one.** Two
-services that both deal in people doing work, with no contract between them.
-That is the [path boundary](../business-context/path-boundary.md): this context
-stops at "which path is this associate on," and task dispatch is a
-seconds-cadence problem that gets to evolve entirely independently. Drawing it
-as an explicit non-edge is more honest than leaving it off the diagram, because
-its absence is a decision, not an omission.
+**The edge to `fulfillment-execution` is capacity, not tasks.** The two
+services both deal in people doing work. The one contract between them is a
+read of *installed station capacity per capability*
+(`GET /capacity/{capability}`), which acts as a physical ceiling on committed
+heads. No task, claim, or associate identity crosses it in either direction.
+The [path boundary](../business-context/path-boundary.md) still holds: this
+context stops at "which path is this associate on," and task dispatch is a
+seconds-cadence problem that evolves independently.
 
-**`facility-layout`'s edges are all dashed.** It is the newest service and an
-Open Host Service by design — its own `CLAUDE.md` names the other four as
-downstream Conformists — but nothing consumes it yet, in any repo. Shown as
-strategic-only.
+**`facility-layout` is now consumed by the WMS/WES services, not by this one.**
+It is an Open Host Service by design. `inventory-storage`, `wes-work-planning`
+and `fulfillment-execution` read locations or travel distances from it. This
+service has no edge to it, for the reason given below.
 
 ## Strategic relationships
 
@@ -103,12 +134,18 @@ DDD reference names this trap explicitly —
 not to feed the consumed event into its own aggregate. The anti-corruption step
 lives on the consumer side, which is where it belongs.
 
-### workforce-management ↔ fulfillment-execution: **deliberate separation**
+### workforce-management ↔ fulfillment-execution: **separated at the task level, Conformist on capacity**
 
-Not "not yet integrated" — *separated*, with a reason. The two contexts change
-at cadences three orders of magnitude apart (shift-length intervals versus
-per-task claims), so fusing them would make every dispatch-policy change a
-workforce-planning change.
+At the task level, not "not yet integrated" — *separated*, with a reason. The
+two contexts change at cadences three orders of magnitude apart
+(shift-length intervals versus per-task claims), so fusing them would make
+every dispatch-policy change a workforce-planning change.
+
+The one live edge is narrower than that. This context is a downstream
+**Conformist** on `fulfillment-execution`'s installed-capacity read
+(`GET /capacity/{capability}`, [ADR 0014](../adr/0014-installed-capacity-ceiling.md)).
+It uses the count as a ceiling on committed heads and learns nothing about
+tasks or claims.
 
 If a certification gate on station claims is ever wired to real data, the shape
 is `fulfillment-execution` as a downstream **Conformist** to this context's
@@ -145,21 +182,21 @@ rule holding.
 ```mermaid
 flowchart LR
   WFM["workforce-management"]
-  OUT["1 topic published<br/>warehouse.workforce.events"]
-  IN["0 topics consumed"]
-  SYNC["0 synchronous calls<br/>to any sibling"]
+  OUT["1 integration topic published<br/>warehouse.workforce.events"]
+  IN["up to 2 sibling topics consumed<br/>process-path-management, labor-performance"]
+  SYNC["up to 2 synchronous reads<br/>fulfillment-execution (capacity),<br/>labor-performance (http mode)"]
 
   WFM --> OUT
   IN --> WFM
-  WFM --- SYNC
+  WFM --> SYNC
 ```
 
-The one place this shape shows up in the API is `CommitShiftPlan`, which takes
-`installedStations` **in the request body** instead of looking it up from
-`wes-work-planning`. That service owns installed-station counts, but taking a
-runtime dependency on a Core context in order to validate a Supporting
-context's own invariant would invert the risk. So the caller carries the
-numbers, and this context validates against them independently.
+`CommitShiftPlan` still takes `installedStations` **in the request body**
+instead of looking it up from `wes-work-planning`, and validates it
+independently. Since [ADR 0014](../adr/0014-installed-capacity-ceiling.md) it
+*also* checks each line against `fulfillment-execution`'s live installed
+capacity. That call is fail-loud: when capacity cannot be verified, the commit
+is rejected with 503 rather than silently allowed.
 
 ## Presentation-layer composition (not a domain-coupling edge)
 
@@ -174,10 +211,12 @@ This is **not** a new domain relationship and is not drawn as an edge above:
 `workforce-mfe` talks only to this service's own REST API
 (`WORKFORCE_API_BASE`), never to a sibling's API or database, and the shell
 contains none of this context's business logic. It does not change this
-context's outbound-edge count (still one Kafka topic published, zero
-consumed, zero synchronous calls to any sibling) — it is a browser composing
+context's integration edges (listed in [Integration](./integration.md)) — it
+is a browser composing
 independently-owned screens, not a new integration contract between bounded
 contexts. The one cross-cutting exception in the fleet (the Order Lifecycle
 view, backed by a BFF in `warehouse-ops-agent`) does not read this context's
-data at all today; this context is not one of the four services the BFF's
-fan-out queries.
+data at all today. `warehouse-ops-agent`'s console reports read this
+context's labor report (`GET /reports/labor` on `cmd/workforce-reports`), and
+its agent calls this context's MCP tools. Both are reads of this context's
+published surfaces.
