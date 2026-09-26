@@ -13,7 +13,7 @@ description: The Supporting bounded context that owns who is on shift, on which 
 This documentation site is an educational Domain-Driven Design exercise. It
 follows real industry-standard patterns and terminology, but it is **not a
 production system** and is **not affiliated with, endorsed by, or
-representative of Amazon or any other company**.
+representative of any real-world company**.
 :::
 
 **Workforce Management** is one of five Go services that make up the

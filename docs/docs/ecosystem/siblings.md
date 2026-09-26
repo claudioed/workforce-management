@@ -18,7 +18,7 @@ Postgres + Kafka stack. They share no code and no database.
 
 The authoritative record of **what is held where, and what portion is usable**.
 
-Implements Amazon-style **chaotic (random) stow**: no fixed product location, an
+Implements e-commerce-retailer-style **chaotic (random) stow**: no fixed product location, an
 item goes to any free bin, and the system records the exact bin. A stow is
 invalid without *both* an item-scan and a location-scan — skipping either is
 precisely how inventory becomes "lost."
